@@ -1,0 +1,12 @@
+{
+    "C_Cpp.default.includePath": [
+        "${default}", 
+        "/usr/include/python3.12/", 
+        "/usr/lib/python3/dist-packages/numpy/core/include/"
+    ],
+    "fortran.linter.modOutput": "${workspaceFolder}/.include",
+    "files.associations": {
+        "python.h": "c",
+        "random": "c"
+    }
+}
