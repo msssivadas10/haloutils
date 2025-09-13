@@ -53,3 +53,18 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Python virtual env
+.venv/
+
+# Fortran include dir
+.include/
+
+# Data files
+*.bin
+*.dat
+*.tmp
+
+# Log files
+*.log
+*.log*
