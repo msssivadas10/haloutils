@@ -54,6 +54,8 @@ dkms.conf
 # debug information files
 *.dwo
 
+__pycache__
+
 # Python virtual env
 .venv/
 
