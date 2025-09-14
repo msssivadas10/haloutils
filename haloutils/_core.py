@@ -334,55 +334,21 @@ class hmargs_t(Structure):
         s  = np.sqrt(self.ps.spectral_moment( self.lagrangian_r(lnm), filt = filt ))
         return fn( self.pointer(), s )
     
-    def set_massfunction(self, data: NDArray[np.float64]) -> None:
+    def set_data(self, data: _T) -> None:
         r"""
-        Set the halo mass-function data for calculations. 
-
-        Parameters
-        ----------
-        data : ndarray of shape=(N,2)
-            First column is the natural log of mass in Msun and second column is the 
-            natural log of mass-function dn/dlnm.
-
+        Set mass-function and bias data. `data` should be a 2D array with 3 columns - halo
+        mass in Msun, mass-function dn/dlnm in Mpc^-3 and bias.
         """
-        assert np.ndim(data) == 2 and np.size(data, 1) > 1
-        spline        = np.empty(( np.size(data, 1), 3 ), dtype=np.float64)
-        spline[:, :2] = data
-
-        lib.generate_cspline.argtypes = [ i8, f8pointer(2) ]
-        lib.generate_cspline.restype  = None
-        lib.generate_cspline( spline.shape[0], spline )
-        self._hmfspline = spline
-        return
-    
-    def set_bias(self, data: NDArray[np.float64]) -> None:
-        r"""
-        Set the halo bias data for calculations. 
-
-        Parameters
-        ----------
-        data : ndarray of shape=(N,2)
-            First column is the natural log of mass in Msun and second column is the 
-            natural log of halo bias.
-            
-        """
-        assert np.ndim(data) == 2 and np.size(data, 1) > 1
-        spline        = np.empty(( np.size(data, 1), 3 ), dtype=np.float64)
-        spline[:, :2] = data
+        raise NotImplementedError()
         
-        lib.generate_cspline.argtypes = [ i8, f8pointer(2) ]
-        lib.generate_cspline.restype  = None
-        lib.generate_cspline( spline.shape[0], spline )
-        self._hbfspline = spline
-        return
-    
     def massfunction(
             self, 
             lnm    : _T, 
             retval : Literal['dn/dm', 'dn/dlnm', 'dn/dlog10m'] = 'dn/dm',
         ) -> _T:
         r"""
-        Calculate the halo mass-function.
+        Calculate the halo mass-function. Values are interpolated from the tables given. If 
+        that is not available, a ValueError is raised.
 
         Parameters
         ----------
@@ -399,23 +365,12 @@ class hmargs_t(Structure):
             has unit Mpc^-3 Msun^-1.
 
         """
-        if self._hmfspline is None:
-            raise ValueError("mass-function data is not available")
-        
-        lib.interpolate.argtypes = [ f8, i8, f8pointer(2) ]
-        lib.interpolate.restype  = f8
-        interpolate = np.vectorize(lib.interpolate, otypes=[np.float64], excluded=[1, 2])
-
-        res = np.exp( interpolate( lnm, self._hmfspline.shape[0], self._hmfspline ) ) # dn/dlnm
-        if retval == 'dn/dlog10m':
-            return res / np.log(10.)
-        if retval == 'dn/dm':
-            return res / np.exp(lnm)
-        return res
+        raise NotImplementedError()
     
     def bias(self, lnm: _T) -> _T:
         r"""
-        Calculate the halo bias.
+        Calculate the halo bias. Values are interpolated from the tables given. If that is 
+        not available, a ValueError is raised.
 
         Parameters
         ----------
@@ -427,40 +382,30 @@ class hmargs_t(Structure):
         hbf : array_like
 
         """
-        if self._hbfspline is None:
-            raise ValueError("bias function data is not available")
-        
-        lib.interpolate.argtypes = [ f8, i8, f8pointer(2) ]
-        lib.interpolate.restype  = f8
-        interpolate = np.vectorize(lib.interpolate, otypes=[np.float64], excluded=[1, 2])
-
-        res = np.exp( interpolate( lnm, self._hbfspline.shape[0], self._hbfspline ) ) # dn/dlnm
-        return res
+        raise NotImplementedError()
     
     # TODO: check
     def average_halo_density(
             self, 
-            mrange  : tuple[float, float] = (0, np.inf),
-            abstol  : float               = 1e-08,
-            reltol  : float               = 1e-08,
-            maxiter : int                 = 100,
+            mrange  : tuple[float, float] = None, 
+            samples : int                 = None, 
+            use_gl  : bool                = False,
         ) -> float:
         r"""
         Return the average halo number density at current redshift.
 
         Parameters
         ----------
-        mrange : (float, float), default=(0, inf)
+        mrange : (float, float), optional
             Mass range over which average is calculated (unit: Msun).
 
-        abstol : float, default=1e-08
-            Absolute tolerance to check convergence of integral.
+        samples : int, optional
+            If non-zero integer, re-sample that much values from the interpolation table.
 
-        reltol : float, default=1e-08
-            Relative tolerance to check convergence of integral.
-
-        maxiter : int, default=100
-            Maximum number of iterations.
+        use_gl : bool, default=False
+            If true, use Gauss-Legendre quadrature rule for integration. If size of the 
+            table (or samples) is less than 64, use rule of that order. Otherwise, use 
+            stacks of 64 point rules.   
 
         Returns
         -------
@@ -468,44 +413,30 @@ class hmargs_t(Structure):
             Halo number density in Mpc^-3.
 
         """
-        if self._hmfspline is None:
-            raise ValueError("mass-function data is not available")
-        
-        lnma = max(self.lnm_min, np.log(max(mrange[0], 1e-08)))
-        lnmb = min(self._hmfspline[-1, 0], np.log(mrange[1]))
-        
-        lib.average_halo_density.argtypes = [ POINTER(hmargs_t), f8, f8, i8, f8pointer(2), f8, f8, i8 ]
-        lib.average_halo_density.restype  = f8
-        res = lib.average_halo_density(
-            self.pointer(), lnma, lnmb, self._hmfspline.shape[0], self._hmfspline, 
-            abstol, reltol, maxiter, 
-        )
-        return res
+        raise NotImplementedError()
     
     # TODO: check
     def average_galaxy_density(
             self, 
-            mrange  : tuple[float, float] = (0, np.inf),
-            abstol  : float               = 1e-08,
-            reltol  : float               = 1e-08,
-            maxiter : int                 = 100,
+            mrange  : tuple[float, float] = None, 
+            samples : int                 = None, 
+            use_gl  : bool                = False,
         ) -> float:
         r"""
         Return the average galaxy number density at current redshift.
 
         Parameters
         ----------
-        mrange : (float, float), default=(0, inf)
+        mrange : (float, float), optional
             Mass range over which average is calculated (unit: Msun).
 
-        abstol : float, default=1e-08
-            Absolute tolerance to check convergence of integral.
+        samples : int, optional
+            If non-zero integer, re-sample that much values from the interpolation table.
 
-        reltol : float, default=1e-08
-            Relative tolerance to check convergence of integral.
-
-        maxiter : int, default=100
-            Maximum number of iterations.
+        use_gl : bool, default=False
+            If true, use Gauss-Legendre quadrature rule for integration. If size of the 
+            table (or samples) is less than 64, use rule of that order. Otherwise, use 
+            stacks of 64 point rules.   
 
         Returns
         -------
@@ -513,109 +444,67 @@ class hmargs_t(Structure):
             Galaxy number density in Mpc^-3.
 
         """
-        if self._hmfspline is None:
-            raise ValueError("mass-function data is not available")
-        
-        lnma = max(self.lnm_min, np.log(max(mrange[0], 1e-08)))
-        lnmb = min(self._hmfspline[-1, 0], np.log(mrange[1]))
-        
-        lib.average_galaxy_density.argtypes = [ POINTER(hmargs_t), f8, f8, i8, f8pointer(2), f8, f8, i8 ]
-        lib.average_galaxy_density.restype  = f8
-        res = lib.average_galaxy_density(
-            self.pointer(), lnma, lnmb, self._hmfspline.shape[0], self._hmfspline, 
-            abstol, reltol, maxiter, 
-        )
-        return res
+        raise NotImplementedError()
 
     # TODO: check
     def average_satellite_frac(
             self, 
-            mrange  : tuple[float, float] = (0, np.inf),
-            abstol  : float               = 1e-08,
-            reltol  : float               = 1e-08,
-            maxiter : int                 = 100,
+            mrange  : tuple[float, float] = None, 
+            samples : int                 = None, 
+            use_gl  : bool                = False,
         ) -> float:
         r"""
         Return the average satellite fraction at current redshift.
 
         Parameters
         ----------
-        mrange : (float, float), default=(0, inf)
+        mrange : (float, float), optional
             Mass range over which average is calculated (unit: Msun).
 
-        abstol : float, default=1e-08
-            Absolute tolerance to check convergence of integral.
+        samples : int, optional
+            If non-zero integer, re-sample that much values from the interpolation table.
 
-        reltol : float, default=1e-08
-            Relative tolerance to check convergence of integral.
-
-        maxiter : int, default=100
-            Maximum number of iterations.
+        use_gl : bool, default=False
+            If true, use Gauss-Legendre quadrature rule for integration. If size of the 
+            table (or samples) is less than 64, use rule of that order. Otherwise, use 
+            stacks of 64 point rules.   
 
         Returns
         -------
         retval : float
 
         """
-        if self._hmfspline is None:
-            raise ValueError("mass-function data is not available")
-        
-        lnma = max(self.lnm_min, np.log(max(mrange[0], 1e-08)))
-        lnmb = min(self._hmfspline[-1, 0], np.log(mrange[1]))
-        
-        lib.average_satellite_frac.argtypes = [ POINTER(hmargs_t), f8, f8, i8, f8pointer(2), f8, f8, i8 ]
-        lib.average_satellite_frac.restype  = f8
-        res = lib.average_satellite_frac(
-            self.pointer(), lnma, lnmb, self._hmfspline.shape[0], self._hmfspline, 
-            abstol, reltol, maxiter, 
-        )
-        return res
+        raise NotImplementedError()
     
     # TODO: check
     def average_galaxy_bias(
             self, 
-            mrange  : tuple[float, float] = (0, np.inf),
-            abstol  : float               = 1e-08,
-            reltol  : float               = 1e-08,
-            maxiter : int                 = 100,
+            mrange  : tuple[float, float] = None, 
+            samples : int                 = None, 
+            use_gl  : bool                = False,
         ) -> float:
         r"""
         Return the average galaxy bias at current redshift.
 
         Parameters
         ----------
-        mrange : (float, float), default=(0, inf)
+        mrange : (float, float), optional
             Mass range over which average is calculated (unit: Msun).
 
-        abstol : float, default=1e-08
-            Absolute tolerance to check convergence of integral.
+        samples : int, optional
+            If non-zero integer, re-sample that much values from the interpolation table.
 
-        reltol : float, default=1e-08
-            Relative tolerance to check convergence of integral.
-
-        maxiter : int, default=100
-            Maximum number of iterations.
+        use_gl : bool, default=False
+            If true, use Gauss-Legendre quadrature rule for integration. If size of the 
+            table (or samples) is less than 64, use rule of that order. Otherwise, use 
+            stacks of 64 point rules.   
 
         Returns
         -------
         retval : float
 
         """
-        if self._hmfspline is None:
-            raise ValueError("mass-function data is not available")
-        if self._hbfspline is None:
-            raise ValueError("bias data is not available")
-        
-        lnma = max(self.lnm_min, np.log(max(mrange[0], 1e-08)))
-        lnmb = min(self._hmfspline[-1, 0], self._hbfspline[-1, 0], np.log(mrange[1]))
-        
-        lib.average_galaxy_bias.argtypes = [ POINTER(hmargs_t), f8, f8, i8, f8pointer(2), i8, f8pointer(2), f8, f8, i8 ]
-        lib.average_galaxy_bias.restype  = f8
-        res = lib.average_galaxy_bias(
-            self.pointer(), lnma, lnmb, self._hmfspline.shape[0], self._hmfspline,   
-            self._hbfspline.shape[0], self._hbfspline, abstol, reltol, maxiter, 
-        )
-        return res
+        raise NotImplementedError()
     
     # C struct for holding the arguments for galaxy catalog generation
     class cgargs_t(Structure):
