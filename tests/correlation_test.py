@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 try:
     # Works only if the module is available in path
-    from haloutils.apps.correlation import Grid
+    from haloutils.correlation import Grid
 
 except ModuleNotFoundError:
     # Loading module from file:
@@ -18,7 +18,7 @@ except ModuleNotFoundError:
     sys.modules[module_name] = haloutils # Add the module to sys.modules 
     spec.loader.exec_module(haloutils)   # Execute the module's code
 
-    from haloutils.apps.correlation import Grid
+    from haloutils.correlation import Grid
 
 def pair_count(points1, points2, bin_edges, boxsize=None, autocorr=False, use_r2=False):
     # Pair counting refernce: brute force method.

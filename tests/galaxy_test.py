@@ -1,9 +1,8 @@
 import numpy as np, math, time
-from scipy.integrate import quad
 
 try:
     # Works only if the module is available in path
-    from haloutils.apps.galaxy_catalog_generator import _share_data, _generate_galaxies, _clean_up
+    from haloutils.galaxy_catalog_generator import _share_data, _generate_galaxies, _clean_up
     from haloutils import Eisenstein98_zb, HaloModel, halo_massfunction
 
 except ModuleNotFoundError:
@@ -19,7 +18,7 @@ except ModuleNotFoundError:
     sys.modules[module_name] = haloutils # Add the module to sys.modules 
     spec.loader.exec_module(haloutils)   # Execute the module's code
 
-    from haloutils.apps.galaxy_catalog_generator import _share_data, _generate_galaxies, _clean_up
+    from haloutils.galaxy_catalog_generator import _share_data, _generate_galaxies, _clean_up
     from haloutils import Eisenstein98_zb, HaloModel, halo_massfunction
 
 m_max = 1e+14

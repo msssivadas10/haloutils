@@ -10,9 +10,10 @@ __version__ = "0.1a"
 import numpy as np
 import numpy.ctypeslib as npct, ctypes as ct
 import os, os.path, glob, re, json, logging, threading, time
+from typing import Literal
 
 # Loading the shared library and setting up the functions
-lib = npct.load_library("libhaloutils", os.path.dirname(os.path.dirname(__file__)))
+lib = npct.load_library("libhaloutils", os.path.dirname(__file__))
 lib.generate_galaxy_catalog.argtypes = [ct.c_int64, ct.c_int64, ct.c_int, ct.POINTER(ct.c_int)]
 lib.generate_galaxy_catalog.restype  = None
 
@@ -252,6 +253,22 @@ def _prepare_abacus_workspace(
     )
     return 0
 
+def _prepare_workspace(
+        id       : int,       # ID for file sharing 
+        args     : dict,      # Values for halo model and other parameters
+        simname  : str,       # Name of the simulation
+        redshift : float,     # Redshift 
+        loc      : str = ".", # Path to look for halo catalog files
+    ) -> int:
+    # Setting up shared data based on simulation. Type of simulation is calculated
+    # based on the prefix of its name.
+
+    if simname.startswith("AbacusSummit"):
+        error_code = _prepare_abacus_workspace(id, args, simname, redshift, loc)
+    else:
+        raise RuntimeError(f"simulation {simname!r} is not supported")
+    return error_code
+
 def _generate_galaxies(id: int, nthreads: int = -1, rseed: int = None) -> None:
     # Generate galaxies using shared halo catalog and parameters. Call this only  
     # after creating the shared files.  
@@ -419,28 +436,111 @@ def _clean_up(id: int) -> None:
 
     return
 
-from typing import Literal
-
 def galaxy_catalog_generator(
-        simname      : str,          # Name of the simulation 
-        redshift     : float,        # Redshift value 
-        mmin         : float,        # Threshold mass for central galaxy formation, Mmin (Msun)  
-        m0           : float,        # Threshold mass for satellite galaxy formation, M0 (Msun)
-        m1           : float,        # Amplitude parameter for satellite count, M1 (Msun)   
-        sigma_m      : float =  0. , # Width parameter for central count, sigmaM (0=step function)
-        alpha        : float =  1. , # Index parameter for satellite count, alpha 
-        scale_shmf   : float =  0.5, # Scale parameter for subhalo mass-function 
-        slope_shmf   : float =  2. , # Slope parameter for subhalo mass-function  
-        filter_fn    : Literal["tophat", "gauss"] = "tophat", # Filter function
-        sigma_size   : int   = 101,  # Size of the variance table
-        output_path  : str   = '.',  # Path to save output files 
-        catalog_path : str   = '.',  # Path to search halo catalogs (simulation specific tree)
-        nthreads     : int   = -1 ,  # Number of threads (default=cpu_count) 
-        rseed        : int   = None, # Random seed value (RSEED)
-        process_id   : int   = None, # ID for data sharing (FID) 
+        simname      : str,
+        redshift     : float,
+        mmin         : float, 
+        m0           : float,
+        m1           : float,
+        sigma_m      : float =  0. ,                          
+        alpha        : float =  1. ,                          
+        scale_shmf   : float =  0.5,
+        slope_shmf   : float =  2. ,
+        filter_fn    : Literal["tophat", "gauss"] = "tophat",
+        sigma_size   : int   = 101,
+        output_path  : str   = '.',
+        catalog_path : str   = '.',
+        nthreads     : int   = -1 ,
+        rseed        : int   = None,
+        process_id   : int   = None,
     ) -> None:
-    r"""
-    Generate galaxy catalogs based on a halo catalog.
+    """
+    Generate galaxy catalogs based on a halo catalog and halo model.\f 
+
+    Parameters
+    ----------
+
+    simname : str
+        Name of the simulation. Currently, only abacus summit simulations have support.
+
+    redshift : float
+        Redshift value 
+
+    mmin : float
+        Threshold mass for central galaxy formation, `M_min` (unit: Msun). 
+
+    m0 : float
+        Threshold mass for satellite galaxy formation, `M0` (unit: Msun).
+    
+    m1 : float
+        Amplitude parameter for satellite count, `M1` (unit: Msun).   
+    
+    sigma_m : float, default=0
+        Width parameter for central count, `sigma_M`. If the value is 0, then a step 
+        function is used instead of the general sigmoid / smooth-step function.
+
+    alpha : float, default=1
+        Index parameter for satellite count, `alpha` 
+
+    scale_shmf : float, default=0.5
+        Scale parameter for the subhalo mass-function. 
+
+    slope_shmf : float, default=2
+        Slope parameter for the subhalo mass-function.
+
+    filter_fn : {tophat, gauss}, optional
+        Filter function used for variance calculations.
+
+    sigma_size : int, default=101
+        Size of the variance table calculated from the power spectrum table.
+
+    output_path : Path, optional
+        Path to save output files. Output ASDF files and metadata file can be 
+        found in the `galaxy_info` subdirectory. Use current directory as default. 
+        Files saved will be 
+
+        - `galaxy_info_{xyz}.asdf` - galaxy catalogs. `xyz` is a 3-digit index of
+          the catalog starting from `000`. 
+
+        -  `metadata.asdf` - other parameters and values.
+
+    catalog_path : Path, optional
+        Path to search halo catalogs (directory structure is simulation specific). 
+        Use current directory as default.
+
+    nthreads : int, optional
+        Number of threads, default is to use the number returned by `os.cpu_count`. 
+
+    rseed : int, optional
+        Random seed value. Must be an integer. (It can also be specifed by the 
+        environment variable `RSEED`)
+
+    process_id : int, optional
+        ID for data sharing. (It can also be specifed by the environment variable 
+        `FID`) 
+
+    Notes
+    -----
+    This supports only for a specific set of simulations. For others use the functions
+    
+    1. `_share_data` to make the required data available as shared data to galaxy 
+      generator procedure, in the correct format.
+    2. `_generate_galaxies` to generate the galaxy catalog using this data.  
+    3. `_save_data_as_asdf` to convert the generated data to portable ASDF format.
+    4. `_clean_up` to clean-up unwanted files (optional).
+
+    in the specified order.
+
+    To use this as a CLI tool, for supported simulations, use
+
+    ```
+    python -m haloutils.galaxy_catalog_generator OPTION1=VALUE1 ...
+    ```
+
+    where the options are same as the parameters (with prefix `--` and `_` in names 
+    replaced by `-`), except `rseed` and `process_id`. Use environment variables to 
+    set them, if needed.  
+
     """
 
     from math import log
@@ -459,55 +559,45 @@ def galaxy_catalog_generator(
     # Random seed value can also be passed as an environment variable. It should
     # be a positive integer. Otherwise, a default value is generated based on the
     # current time. 
-    if not isinstance(rseed, int) or rseed < 0:
+    if not isinstance(rseed, int):
         rseed = os.environ.get("RSEED", "None")
         rseed = int(rseed) if str.isnumeric(rseed) else None
             
     # Setting up shared data based on simulation. Type of simulation is calculated
     # based on the prefix of its name.  
-    if simname.startswith("AbacusSummit"):
-        error_code = _prepare_abacus_workspace(
-            process_id, 
-            {
-                "lnm_min"   : log(mmin),
-                "sigma_m"   : sigma_m,
-                "lnm0"      : log(m0),
-                "lnm1"      : log(m1),
-                "alpha"     : alpha,
-                "scale_shmf": scale_shmf,
-                "slope_shmf": slope_shmf,
-                "sigma_size": sigma_size,
-                "filter"    : filter_fn,
-            }, 
-            simname, 
-            redshift, 
-            catalog_path,
-        )
-    else:
-        raise RuntimeError(f"simulation {simname!r} is not supported")
-    if error_code != 0:
-        return # catalog generation failed :(
+    error_code = _prepare_workspace(
+        process_id, 
+        {
+            "lnm_min"   : log(mmin),
+            "sigma_m"   : sigma_m,
+            "lnm0"      : log(m0),
+            "lnm1"      : log(m1),
+            "alpha"     : alpha,
+            "scale_shmf": scale_shmf,
+            "slope_shmf": slope_shmf,
+            "sigma_size": sigma_size,
+            "filter"    : filter_fn,
+        }, 
+        simname, 
+        redshift, 
+        catalog_path,
+    )
+    if error_code != 0: return # catalog generation failed :(
     
-    # Generating the galaxies
-    _generate_galaxies(process_id, nthreads, rseed)
-
-    # Saving data
-    _save_data_as_asdf(process_id, output_path)
-
-    # Cleaning up working folder
-    _clean_up(process_id)
-    
+    _generate_galaxies(process_id, nthreads, rseed) # Generating the galaxies
+    _save_data_as_asdf(process_id, output_path)     # Saving data
+    _clean_up(process_id)                           # Cleaning up working folder
     return
 
 if __name__ == "__main__":
 
-    import click, logging.config, warnings
+    import click, logging.config, warnings, inspect
     from click import Choice, IntRange, Path
 
     warnings.catch_warnings(action = "ignore")
     
     def get_log_filename(): 
-        p  = os.path.join( os.getcwd() , "logs" )
+        p  = os.path.join( os.getcwd(), "logs" )
         os.makedirs(p, exist_ok = True)
         return os.path.join( p, re.sub(r"(?<=\.)py$", "log", os.path.basename(__file__)) )
     
@@ -538,28 +628,29 @@ if __name__ == "__main__":
         "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
     })
 
-    options = [
-        (["--simname"     ], str                        , "Name of simulation"              ,            ),
-        (["--redshift"    ], float                      , "Redshift value"                  ,            ),
-        (["--mmin"        ], float                      , "Halo model parameter Mmin (Msun)",            ),
-        (["--m0"          ], float                      , "Halo model parameter M0 (Msun)"  ,            ),
-        (["--m1"          ], float                      , "Halo model parameter M1 (Msun)"  ,            ),
-        (["--sigma-m"     ], float                      , "Halo model parameter sigmaM"     ,  0.        ),
-        (["--alpha"       ], float                      , "Halo model parameter alpha"      ,  1.        ),
-        (["--scale_shmf"  ], float                      , "Scale parameter for SHMF"        ,  0.5       ),
-        (["--slope_shmf"  ], float                      , "Slope parameter for SHMF"        ,  2.        ),
-        (["--filter_fn"   ], Choice(["tophat", "gauss"]), "Filter function for variance"    , "tophat"   ),
-        (["--sigma_size"  ], IntRange(3)                , "Size of variance table"          , 101        ),
-        (["--output_path" ], Path(file_okay = False)    , "Path to write output files"      , os.getcwd()),
-        (["--catalog_path"], Path(exists = True )       , "Path to look for catalog files"  , os.getcwd()),
-        (["--nthreads"    ], int                        , "Number of threads to use"        , -1         ),
-    ]
-    cli = galaxy_catalog_generator
-    for options, otype, help, *default in reversed(options):
-        if not default:
-            cli = click.option(*options, type = otype, required = True, help = help)(cli)
-        else:
-            cli = click.option(*options, type = otype, default = default[0], help = help)(cli)
+    cli  = galaxy_catalog_generator
+    pmap = inspect.signature(cli).parameters
+    for options, help_string, _type in reversed([
+        (["--simname"     ], "Name of simulation"             , str                        ),
+        (["--redshift"    ], "Redshift value"                 , float                      ),
+        (["--mmin"        ], "Central galaxy threshold mass"  , float                      ),
+        (["--m0"          ], "Satellite galaxy threshold"     , float                      ),
+        (["--m1"          ], "Satellite count amplitude"      , float                      ),
+        (["--sigma-m"     ], "Central galaxy width parameter" , float                      ),
+        (["--alpha"       ], "Satellite power-law count index", float                      ),
+        (["--scale-shmf"  ], "SHMF scale parameter"           , float                      ),
+        (["--slope-shmf"  ], "SHMF slope parameter"           , float                      ),
+        (["--filter-fn"   ], "Filter function for variance"   , Choice(["tophat", "gauss"])),
+        (["--sigma-size"  ], "Size of variance table"         , IntRange(3)                ),
+        (["--output-path" ], "Path to output files"           , Path(file_okay = False)    ),
+        (["--catalog-path"], "Path to catalog files"          , Path(exists    = True )    ),
+        (["--nthreads"    ], "Number of threads to use"       , int                        ),
+    ]):
+        attrs   = { "required": True  }
+        default = pmap.get(options[0].removeprefix('--').replace('-', '_')).default
+        if default is not inspect._empty: 
+            attrs["default"] = default; attrs.pop("required") # optional argument with a default value
+        cli = click.option(*options, type = _type, help = help_string, **attrs)(cli)
     cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli) 
     cli = click.command(cli)
     cli()
