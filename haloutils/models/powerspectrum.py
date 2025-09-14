@@ -9,7 +9,7 @@ from typing import Literal, TypeVar, Callable
 
 _T = TypeVar('_T')
 
-lib = load_library('libhaloutils', os.path.dirname(__file__))
+lib = load_library('libhaloutils', os.path.dirname(os.path.dirname(__file__)))
 
 # Pointer to a float64 ndarray of given dimension 
 def f8pointer(ndim): return ndpointer(dtype=np.float64, ndim=ndim, flags='C_CONTIGUOUS')

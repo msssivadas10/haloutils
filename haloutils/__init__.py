@@ -5,5 +5,5 @@ __all__ = [
     'Eisenstein98_zb', 'Eisenstein98_mnu', 'Eisenstein98_bao' 
 ]
 
-from ._core import HaloModel, halo_massfunction, halo_bias
-from .powerspectrum import Eisenstein98_zb, Eisenstein98_mnu, Eisenstein98_bao
+from .models.halo_model import HaloModel, halo_massfunction, halo_bias
+from .models.powerspectrum import Eisenstein98_zb, Eisenstein98_mnu, Eisenstein98_bao
