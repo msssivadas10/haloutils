@@ -3,14 +3,12 @@ module rfunctions_mod
     
     use, intrinsic :: ieee_arithmetic
     use iso_c_binding
+    use constants_mod, only: pi
     implicit none
 
     private
     public :: variance, correlation
-
-    real(c_double), parameter :: pi  = 3.141592653589793_c_double
-    !! Pi
-    
+ 
 contains
 
 ! Matter Variance:
