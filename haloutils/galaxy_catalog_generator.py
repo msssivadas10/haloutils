@@ -140,11 +140,17 @@ def _prepare_abacus_workspace(
     pktab[:,0] = np.log(pktab[:,0]) + np.log(h)   # k in h/Mpc     -> log(k in 1/Mpc)
     pktab[:,1] = np.log(pktab[:,1]) - np.log(h)*3 # P in (Mpc/h)^3 -> log(P in Mpc^3)
 
+    def _get_closest(dct: dict[float, float], target_key: float) -> float:
+        # Get the closest float key given target key, within precision, from a
+        # float->float mapping. 
+        if target_key in dct: return target_key 
+        return next(key for key in dct if abs(target_key - key) < 1e-09)
+    
     # Growth factor is calculated using the GrowthTable in the metadata, and
     # power spectrum is interpolated using this value. 
-    z_target   = meta["Redshift"]
-    z_pk       = meta['ZD_Pk_file_redshift'] 
     dplus_tab  = meta['GrowthTable']
+    z_target   = _get_closest( dplus_tab, meta["Redshift"]            )
+    z_pk       = _get_closest( dplus_tab, meta['ZD_Pk_file_redshift'] ) 
     dplus_at_z = dplus_tab[z_target] / dplus_tab[z_pk] # growth factor at z, w.r.to z_pk
     pktab[:,1] = pktab[:,1] + 2*np.log(dplus_at_z)     # interpolate power spectrum to z
     dplus_at_z = dplus_tab[z_target] / dplus_tab[0.0]  # growth factor at z, w.r.to 0
@@ -393,6 +399,7 @@ def _save_data_as_asdf(id: int, path: str = '.') -> None:
 
     with open(shared_galaxy_file, 'r') as fp:
         i = 0
+        total_items_loaded = 0
         while True:
             galaxy_buffer = np.fromfile(
                 fp, 
@@ -400,6 +407,7 @@ def _save_data_as_asdf(id: int, path: str = '.') -> None:
                 count = max_items_per_file,
             )
             if galaxy_buffer.shape[0] < 1: break
+            total_items_loaded += galaxy_buffer.shape[0]
             
             with asdf.AsdfFile({
                 "header" : meta, 
@@ -412,6 +420,7 @@ def _save_data_as_asdf(id: int, path: str = '.') -> None:
             }) as af:
                 fn = os.path.join(outdir, f"galaxy_info_{i:03d}.asdf")
                 af.write_to(fn, all_array_compression = 'zlib')
+                logger.info(f"completed: {100*total_items_loaded/total_items:.2f}% - {i} files written...")
                 i += 1
         logger.info(f"written {i} galaxy catalog files.")
 
