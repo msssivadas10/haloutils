@@ -9,7 +9,7 @@ __version__ = "0.1a"
 
 import numpy as np
 import numpy.ctypeslib as npct, ctypes as ct
-import os, os.path, glob, re, json, logging, threading, time
+import os, os.path, glob, re, json, logging, threading, multiprocessing, time
 from typing import Literal
 
 # Loading the shared library and setting up the functions
@@ -345,7 +345,7 @@ def _log_watcher(id: int, stop_event: threading.Event) -> None:
         logger.exception("error deleting log file.")  
     return 
 
-def _save_data_as_asdf(id: int, path: str = '.') -> None:
+def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
     # Save data from the shared output to ASDF file(s) in the given path. 
 
     import asdf
@@ -387,42 +387,83 @@ def _save_data_as_asdf(id: int, path: str = '.') -> None:
     # 1 GiB size. Each file will store the metadata (header), and the data section 
     # contains position (Mpc), mass (Msun), parent halo ID and galaxy type (c for 
     # central, s for satellite).     
+    dtype              = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8"), ("typ", "S1")]
     shared_galaxy_file = f"{id}.gbuf.dat"
     galaxy_file_size   = os.path.getsize(shared_galaxy_file) # size of the output file in bytes
-    record_size        = 41 # size of galaxt catalog record in bytes
-    assert galaxy_file_size % record_size == 0, "galaxy catalog filesize should be multiple of 41"
+    record_size        = np.dtype(dtype).itemsize            # size of a galaxy catalog record in bytes
+    assert galaxy_file_size % record_size == 0, f"galaxy catalog filesize should be multiple of {record_size}"
 
-    total_items        = galaxy_file_size // record_size # total numebr of records
-    max_items_per_file = 1073741824 // record_size       # maximum number of records (filesize: 1 GiB)
-    if total_items % max_items_per_file > 0:
-        max_items_per_file += 1
+    total_items = galaxy_file_size // record_size # total numebr of records
+    chunk_size  = max(1073741824 // record_size, (total_items + nthreads - 1) // nthreads)
+    files_count = (total_items + chunk_size - 1) // chunk_size
 
-    with open(shared_galaxy_file, 'r') as fp:
-        i = 0
-        total_items_loaded = 0
-        while True:
-            galaxy_buffer = np.fromfile(
-                fp, 
-                dtype = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8"), ("typ", "S1")], 
-                count = max_items_per_file,
-            )
-            if galaxy_buffer.shape[0] < 1: break
-            total_items_loaded += galaxy_buffer.shape[0]
-            
-            with asdf.AsdfFile({
-                "header" : meta, 
-                "data"   : {
-                    "parentHaloID"   : galaxy_buffer["id"  ], 
-                    "galaxyPosition" : galaxy_buffer["pos" ], 
-                    "galaxyMass"     : galaxy_buffer["mass"], 
-                    "galaxyType"     : galaxy_buffer["typ" ],
-                } 
-            }) as af:
-                fn = os.path.join(outdir, f"galaxy_info_{i:03d}.asdf")
-                af.write_to(fn, all_array_compression = 'zlib')
-                logger.info(f"completed: {100*total_items_loaded/total_items:.2f}% - {i} files written...")
-                i += 1
-        logger.info(f"written {i} galaxy catalog files.")
+    args = []
+    for i in range(files_count):
+        start = i * chunk_size
+        count = min(chunk_size, total_items - start)
+        args.append((shared_galaxy_file, dtype, start, count, outdir, meta, i))
+
+    if nthreads < 1 : nthreads = os.cpu_count()
+    logger.info(f"exporting data to asdf format ({nthreads} processes)...")
+    with multiprocessing.Pool(processes = nthreads) as pool:
+        pool.map(_write_asdf_chunck, args)
+    logger.info(f"written {files_count} galaxy catalog files.")
+
+    # max_items_per_file = 1073741824 // record_size       # maximum number of records (filesize: 1 GiB)
+    # if total_items % max_items_per_file > 0:
+    #     max_items_per_file += 1
+    #
+    # with open(shared_galaxy_file, 'r') as fp:
+    #     i = 0
+    #     total_items_loaded = 0
+    #     while True:
+    #         galaxy_buffer = np.fromfile(
+    #             fp, 
+    #             dtype = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8"), ("typ", "S1")], 
+    #             count = max_items_per_file,
+    #         )
+    #         if galaxy_buffer.shape[0] < 1: break
+    #         total_items_loaded += galaxy_buffer.shape[0]
+    #
+    #         with asdf.AsdfFile({
+    #             "header" : meta, 
+    #             "data"   : {
+    #                 "parentHaloID"   : galaxy_buffer["id"  ], 
+    #                 "galaxyPosition" : galaxy_buffer["pos" ], 
+    #                 "galaxyMass"     : galaxy_buffer["mass"], 
+    #                 "galaxyType"     : galaxy_buffer["typ" ],
+    #             } 
+    #         }) as af:
+    #             fn = os.path.join(outdir, f"galaxy_info_{i:03d}.asdf")
+    #             af.write_to(fn, all_array_compression = 'zlib')
+    #             logger.info(f"completed: {100*total_items_loaded/total_items:.2f}% - {i} files written...")
+    #             i += 1
+    #     logger.info(f"written {i} galaxy catalog files.")
+
+    return
+
+def _write_asdf_chunck(args: tuple[str, list, int, int, str, int]) -> None:
+    # Write a part of the data as ASDF file.
+    
+    import asdf
+    
+    shared_galaxy_file, dtype, start, count, outdir, meta, i = args
+
+    # Loading the galaxy data buffer as a memmap
+    mm = np.memmap(shared_galaxy_file, dtype = dtype, mode = 'r', offset = 0)
+    galaxy_buffer = mm[start:start+count] 
+
+    with asdf.AsdfFile({
+        "header" : meta, 
+        "data"   : {
+            "parentHaloID"   : galaxy_buffer["id"  ], 
+            "galaxyPosition" : galaxy_buffer["pos" ], 
+            "galaxyMass"     : galaxy_buffer["mass"], 
+            "galaxyType"     : galaxy_buffer["typ" ],
+        } 
+    }) as af:
+        fn = os.path.join(outdir, f"galaxy_info_{i:03d}.asdf")
+        af.write_to(fn, all_array_compression = 'zlib')
 
     return
 
@@ -593,9 +634,9 @@ def galaxy_catalog_generator(
     )
     if error_code != 0: return # catalog generation failed :(
     
-    _generate_galaxies(process_id, nthreads, rseed) # Generating the galaxies
-    _save_data_as_asdf(process_id, output_path)     # Saving data
-    _clean_up(process_id)                           # Cleaning up working folder
+    _generate_galaxies(process_id, nthreads, rseed)       # Generating the galaxies
+    _save_data_as_asdf(process_id, nthreads, output_path) # Saving data
+    _clean_up(process_id) # Cleaning up working folder
     return
 
 if __name__ == "__main__":
