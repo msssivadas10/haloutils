@@ -240,17 +240,17 @@ contains
         integer(c_int), intent(out) :: error
         !! Error code (0=success, 1=error)
 
-        integer(c_int64_t), parameter :: chunk_size      = 10000
         integer(c_int64_t), parameter :: item_size_bytes = c_sizeof( &
-            halodata_t(                                    &
-                  0_c_int64_t,                             &
-                [ 0._c_double, 0._c_double, 0._c_double ], &
-                  0._c_double )                            &   
+        halodata_t(                                    &
+        0_c_int64_t,                             &
+        [ 0._c_double, 0._c_double, 0._c_double ], &
+        0._c_double )                            &   
         ) !! Size of `halodata_t`: should be 40
-
+        
         real(c_double)     :: bbox(3, 2) !! Bounding box [min, max]
         type(hmargs_t)     :: hmargs     !! Halo model parameters
         integer(c_int64_t) :: ns         !! Size of the variance spline
+        integer(c_int64_t) :: chunk_size
         real(c_double), allocatable :: sigma(:,:)
         !! A spline for interpolating matter variance as function of mass 
         !! in Msun (i.e., ln(sigma) as function of ln(m)).
@@ -307,6 +307,9 @@ contains
         ! Set number of threads
         call omp_set_num_threads(nthreads) 
         write(fl, '("galaxy catalog generation using ",i0," threads")') nthreads
+        ! Setting the chunk size multiple of no. of threads, so that halos are 
+        ! assigned evenly over multiple threads.
+        chunk_size = nthreads*1000 
 
         ! Loading halo data a chunks from the input file
         n_halos_processed = 0
