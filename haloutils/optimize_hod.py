@@ -94,13 +94,14 @@ def optimizer1(
     optimum_hod = ( optim_result.x[0], sigma_m, optim_result.x[0], optim_result.x[1], alpha )
     return optimum_hod
 
-logging.basicConfig(level=logging.INFO)
-mass_func = np.exp( np.loadtxt('x.dat') )
-p = optimizer1(
-    2.5e-05, 
-    0.05, 
-    mass_func, 
-    0., 
-    1., 
-)
-print(p)
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    mass_func = np.exp( np.loadtxt('x.dat') )
+    p = optimizer1(
+        2.5e-05, 
+        0.05, 
+        mass_func, 
+        0., 
+        1., 
+    )
+    print(p)
