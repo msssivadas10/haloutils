@@ -9,7 +9,8 @@ __version__ = "0.1a"
 
 import numpy as np
 import numpy.ctypeslib as npct, ctypes as ct
-import os, os.path, glob, re, json, logging, threading, multiprocessing, time
+import os, os.path, glob, re, json, logging, asdf, time
+import threading, multiprocessing
 from typing import Literal
 
 # Loading the shared library and setting up the functions
@@ -348,7 +349,13 @@ def _log_watcher(id: int, stop_event: threading.Event) -> None:
 def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
     # Save data from the shared output to ASDF file(s) in the given path. 
 
-    import asdf
+    from math import ceil
+
+    # Size of a galaxy buffer record: i8 (halo id) + 3 x f8 (position) + f8 (mass) + char (type)
+    GBUF_ITEM_SIZE = 41 
+
+    # Minimum size limit for a single output data chunk in bytes
+    FILE_MIN_SIZE = 1073741824 # 1 GiB
 
     logger = logging.getLogger()
 
@@ -383,33 +390,42 @@ def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
     
     for field in fields_to_delete: _ = meta.pop(field, None) # delete fields
     
-    # Loading galaxy data from the binary file and save them in ASDF files of maximum 
-    # 1 GiB size. Each file will store the metadata (header), and the data section 
-    # contains position (Mpc), mass (Msun), parent halo ID and galaxy type (c for 
-    # central, s for satellite).     
-    dtype              = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8"), ("typ", "S1")]
+    # Loading galaxy data from the binary file and save them in ASDF files: 
+    # Each file will store the metadata (header), and the data section contains 
+    # position (Mpc), mass (Msun), parent halo ID and galaxy type (c for central, 
+    # s for satellite).     
     shared_galaxy_file = f"{id}.gbuf.dat"
     galaxy_file_size   = os.path.getsize(shared_galaxy_file) # size of the output file in bytes
-    record_size        = np.dtype(dtype).itemsize            # size of a galaxy catalog record in bytes
-    assert galaxy_file_size % record_size == 0, f"galaxy catalog filesize should be multiple of {record_size}"
+    assert galaxy_file_size % GBUF_ITEM_SIZE == 0            # file check
+    total_items = galaxy_file_size // GBUF_ITEM_SIZE         # total numebr of records
+    chunk_size  = ceil(FILE_MIN_SIZE / GBUF_ITEM_SIZE)  # size of chunk of data (min: 1 GiB)
 
-    total_items = galaxy_file_size // record_size # total numebr of records
-    chunk_size  = max(1073741824 // record_size, (total_items + nthreads - 1) // nthreads)
-    files_count = (total_items + chunk_size - 1) // chunk_size
-
-    args = []
-    for i in range(files_count):
-        start = i * chunk_size
-        count = min(chunk_size, total_items - start)
-        args.append((shared_galaxy_file, dtype, start, count, outdir, meta, i))
+    args, files_count, n_items = [], 0, 0
+    while n_items < total_items:
+        start = files_count * chunk_size             # start of the block
+        count = min(chunk_size, total_items - start) # size of the block
+        fn    = os.path.join(outdir, f"galaxy_info_{files_count:03d}.asdf") # output file 
+        args.append((shared_galaxy_file, start, count, fn, meta))
+        n_items     += count
+        files_count += 1
 
     if nthreads < 1 : nthreads = os.cpu_count()
+    nthreads = min(nthreads, files_count)
     logger.info(f"exporting data to asdf format ({nthreads} processes)...")
     with multiprocessing.Pool(processes = nthreads) as pool:
-        pool.map(_write_asdf_chunck, args)
+        # Distributed file export:
+        file_summary = pool.map(_write_asdf_chunck, args)
+
+        # Writing a summary file:
+        with open(os.path.join(outdir, "info.txt"), 'w') as fp: 
+            fp.write( "file_name, central_count, satellite_count, file_size_bytes \n" )
+            for fn, central_count, satellite_count in file_summary:
+                file_size, fn = os.path.getsize(fn), os.path.basename(fn)
+                fp.write(f"{fn}, {central_count}, {satellite_count}, {file_size} \n")
     logger.info(f"written {files_count} galaxy catalog files.")
 
-    # max_items_per_file = 1073741824 // record_size       # maximum number of records (filesize: 1 GiB)
+    # record_size        = np.dtype(dtype).itemsize  # size of a galaxy catalog record in bytes
+    # max_items_per_file = 1073741824 // record_size # maximum number of records (filesize: 1 GiB)
     # if total_items % max_items_per_file > 0:
     #     max_items_per_file += 1
     #
@@ -442,16 +458,25 @@ def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
 
     return
 
-def _write_asdf_chunck(args: tuple[str, list, int, int, str, int]) -> None:
-    # Write a part of the data as ASDF file.
+def _write_asdf_chunck(args: tuple[str, int, int, str, dict]) -> tuple[str, int, int]:
+    # Write a part of the data as ASDF file. This returns the name of the file
+    # written and the number of central and satellite galaxies as. 
     
-    import asdf
-    
-    shared_galaxy_file, dtype, start, count, outdir, meta, i = args
+    shared_galaxy_file, start, count, fn, meta = args
 
     # Loading the galaxy data buffer as a memmap
-    mm = np.memmap(shared_galaxy_file, dtype = dtype, mode = 'r', offset = 0)
+    mm = np.memmap(
+        shared_galaxy_file, 
+        dtype  = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8"), ("typ", "S1")], 
+        mode   = 'r', 
+        offset = 0, 
+    )
     galaxy_buffer = mm[start:start+count] 
+
+    # Calculating galaxy counts:
+    types, counts = np.unique(galaxy_buffer["typ"], return_counts = True)
+    counts_dict   = dict(zip(types, counts))
+    assert set(counts_dict) == { b'c', b's' }
 
     with asdf.AsdfFile({
         "header" : meta, 
@@ -462,10 +487,9 @@ def _write_asdf_chunck(args: tuple[str, list, int, int, str, int]) -> None:
             "galaxyType"     : galaxy_buffer["typ" ],
         } 
     }) as af:
-        fn = os.path.join(outdir, f"galaxy_info_{i:03d}.asdf")
         af.write_to(fn, all_array_compression = 'zlib')
 
-    return
+    return fn, counts_dict[b'c'], counts_dict[b's']
 
 def _clean_up(id: int) -> None:
     #  Clean up unwanted files, optionally keep halo catalog.
