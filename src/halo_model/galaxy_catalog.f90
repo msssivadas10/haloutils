@@ -12,7 +12,7 @@ module galaxy_catalog_mod
     implicit none
 
     private
-    public :: setup_catalog_generation, generate_galaxies!, generate_galaxy_catalog
+    public :: setup_catalog_generation, generate_galaxies, generate_galaxy_catalog
     
     type, public, bind(c) :: halodata_t
         !! A struct containing data about a halo
