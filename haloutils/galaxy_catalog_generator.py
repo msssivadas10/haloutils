@@ -720,56 +720,29 @@ if __name__ == "__main__":
         "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
     })
 
-    # cli  = galaxy_catalog_generator
-    # pmap = inspect.signature(cli).parameters
-    # for options, help_string, _type in reversed([
-    #     (["--simname"     ], "Name of simulation"             , str                        ),
-    #     (["--redshift"    ], "Redshift value"                 , float                      ),
-    #     (["--mmin"        ], "Central galaxy threshold mass"  , float                      ),
-    #     (["--m0"          ], "Satellite galaxy threshold"     , float                      ),
-    #     (["--m1"          ], "Satellite count amplitude"      , float                      ),
-    #     (["--sigma-m"     ], "Central galaxy width parameter" , float                      ),
-    #     (["--alpha"       ], "Satellite power-law count index", float                      ),
-    #     (["--scale-shmf"  ], "SHMF scale parameter"           , float                      ),
-    #     (["--slope-shmf"  ], "SHMF slope parameter"           , float                      ),
-    #     (["--filter-fn"   ], "Filter function for variance"   , Choice(["tophat", "gauss"])),
-    #     (["--sigma-size"  ], "Size of variance table"         , IntRange(3)                ),
-    #     (["--output-path" ], "Path to output files"           , Path(file_okay = False)    ),
-    #     (["--catalog-path"], "Path to catalog files"          , Path(exists    = True )    ),
-    #     (["--nthreads"    ], "Number of threads to use"       , int                        ),
-    # ]):
-    #     attrs   = { "required": True  }
-    #     default = pmap.get(options[0].removeprefix('--').replace('-', '_')).default
-    #     if default is not inspect._empty: 
-    #         attrs["default"] = default; attrs.pop("required") # optional argument with a default value
-    #     cli = click.option(*options, type = _type, help = help_string, **attrs)(cli)
-    # cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli) 
-    # cli = click.command(cli)
-    # cli()
-
-
-galaxy_catalog_generator(
-    "AbacusSummit_hugebase_c000_ph000", 
-    3., 
-    2e+12, 
-    2e+12, 
-    2e+13, 
-    output_path="_data/",
-    catalog_path="/home/ms3/Documents/phd/cosmo/workspace/tests/data",
-    rseed=123456,
-    process_id=0,
-    nthreads=1,
-)
-
-# dt = np.dtype([("id"  , "<i8"   ), 
-#                ("pos" , "<f8", 3), 
-#                ("mass", "<f8"   ), 
-#                ("typ" ,  "S1"   )], align = 0)
-# print(dt.itemsize)
-# print(
-#     np.fromfile(
-#         '0.gbuf.dat', 
-#         dt, 
-#         10
-#     )
-# )
+    cli  = galaxy_catalog_generator
+    pmap = inspect.signature(cli).parameters
+    for options, help_string, _type in reversed([
+        (["--simname"     ], "Name of simulation"             , str                        ),
+        (["--redshift"    ], "Redshift value"                 , float                      ),
+        (["--mmin"        ], "Central galaxy threshold mass"  , float                      ),
+        (["--m0"          ], "Satellite galaxy threshold"     , float                      ),
+        (["--m1"          ], "Satellite count amplitude"      , float                      ),
+        (["--sigma-m"     ], "Central galaxy width parameter" , float                      ),
+        (["--alpha"       ], "Satellite power-law count index", float                      ),
+        (["--scale-shmf"  ], "SHMF scale parameter"           , float                      ),
+        (["--slope-shmf"  ], "SHMF slope parameter"           , float                      ),
+        (["--filter-fn"   ], "Filter function for variance"   , Choice(["tophat", "gauss"])),
+        (["--sigma-size"  ], "Size of variance table"         , IntRange(3)                ),
+        (["--output-path" ], "Path to output files"           , Path(file_okay = False)    ),
+        (["--catalog-path"], "Path to catalog files"          , Path(exists    = True )    ),
+        (["--nthreads"    ], "Number of threads to use"       , int                        ),
+    ]):
+        attrs   = { "required": True  }
+        default = pmap.get(options[0].removeprefix('--').replace('-', '_')).default
+        if default is not inspect._empty: 
+            attrs["default"] = default; attrs.pop("required") # optional argument with a default value
+        cli = click.option(*options, type = _type, help = help_string, **attrs)(cli)
+    cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli) 
+    cli = click.command(cli)
+    cli()
