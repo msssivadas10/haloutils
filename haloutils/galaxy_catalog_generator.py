@@ -15,8 +15,8 @@ from typing import Literal
 
 # Loading the shared library and setting up the functions
 lib = npct.load_library("libhaloutils", os.path.dirname(__file__))
-lib.generate_galaxy_catalog.argtypes = [ct.c_int64, ct.c_int64, ct.c_int, ct.POINTER(ct.c_int)]
-lib.generate_galaxy_catalog.restype  = None
+lib.cgenerate_galaxy_catalog.argtypes = [ct.c_int64, ct.c_int64, ct.c_int, ct.POINTER(ct.c_int)]
+lib.cgenerate_galaxy_catalog.restype  = None
 
 def _share_data(
         id            : int,                             # file sharing ID
@@ -29,9 +29,25 @@ def _share_data(
     ) -> None:
     # Save the arguments to a binary file for sharing. 
 
-    shared_file = f"{id}.vars.dat"
-    with open(shared_file, "wb") as fp:
-        # First block is the halo model parameters as struct `hmargs_t`...
+    halo_catalog_file   = f"{id}.hbuf.dat" # Path to the halo catalog file (input)
+    galaxy_catalog_file = f"{id}.gbuf.dat" # Path to the galaxy catalog file (output)
+    log_file            = f"{id}.log"      # Path to the log file
+
+    PATH_FIXED_LEN  = 4096
+    def _encode_as_fixedlen_string(fn: str) -> bytes:
+        fn_ = fn.ljust( PATH_FIXED_LEN ).encode('utf-8')
+        assert len(fn_) == PATH_FIXED_LEN
+        return fn_
+
+    shared_vars_file = f"{id}.vars.dat"
+    with open(shared_vars_file, "wb") as fp:
+
+        # First block is the halo and galaxy catalog filenames and path to log file as 
+        # 4096 character strings
+        for fn in ( halo_catalog_file, galaxy_catalog_file, log_file ):
+            fp.write( _encode_as_fixedlen_string(fn) )
+
+        # Next block is the halo model parameters as struct `hmargs_t`...
         hmargs_t = [
             ( "lnm_min"   ,  "<f8"  ),( "sigma_m"   ,  "<f8"  ),
             ( "lnm0"      ,  "<f8"  ),( "lnm1"      ,  "<f8"  ),
@@ -42,7 +58,7 @@ def _share_data(
         ]
         np.array(
             tuple( hmargs.get(field) for field, _ in hmargs_t ), 
-            dtype = hmargs_t
+            dtype = np.dtype(hmargs_t, align = True)
         ).tofile(fp)
 
         # Next block stores the bounding box in Mpc, size of power spectrum table, 
@@ -57,17 +73,10 @@ def _share_data(
         # Last block is the power spectrum table.
         pktable.astype("<f8").tofile(fp)
     
-    # Metadata is saved in JSON format 
-    shared_file = f"{id}.meta.dat"  
-    with open(shared_file, 'w') as fp: 
-        json.dump(metadata, fp, sort_keys = False, separators = (',', ':'))
-
     # Save the halo catalog data a binary file for sharing. Passing the halo catalog 
     # data loder as a generator, so that only the needed the data is loaded, making
     # effiicient use of memory. 
-    shared_file = f"{id}.hbuf.dat"
-    with open(shared_file, 'wb') as fp: 
-
+    with open(halo_catalog_file, 'wb') as fp: 
         # Data written as a stream of `halodata_t` structs.
         halodata_t = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8")]
         for halo_id, halo_pos, halo_mass in data_generator:
@@ -77,6 +86,10 @@ def _share_data(
             halo_buffer["pos" ] = np.array(halo_pos ).astype("<f8", copy = False)
             halo_buffer["mass"] = np.array(halo_mass).astype("<f8", copy = False)
             halo_buffer.tofile(fp)
+    
+    # Metadata is saved in JSON format  
+    with open(f"{id}.meta.dat", 'w') as fp: 
+        json.dump(metadata, fp, sort_keys = False, separators = (',', ':'))
 
     return
 
@@ -280,7 +293,7 @@ def _generate_galaxies(id: int, nthreads: int = -1, rseed: int = None) -> None:
     # Generate galaxies using shared halo catalog and parameters. Call this only  
     # after creating the shared files.  
     
-    assert os.path.exists( f"{id}.vars.dat" ), "missing shared variable data"
+    assert os.path.exists( f"{id}.vars.dat" ), "missing shared data file"
     assert os.path.exists( f"{id}.hbuf.dat" ), "missing shared halo catalog data"
 
     if nthreads < 1 : nthreads = os.cpu_count()
@@ -294,7 +307,7 @@ def _generate_galaxies(id: int, nthreads: int = -1, rseed: int = None) -> None:
     
     # Galaxy generation
     error_flag = ct.c_int(1) # Error code: non-zero on error 
-    lib.generate_galaxy_catalog(id, rseed, nthreads, ct.byref(error_flag))
+    lib.cgenerate_galaxy_catalog(id, rseed, nthreads, ct.byref(error_flag))
 
     if error_flag.value != 0:
         logger = logging.getLogger()
@@ -331,8 +344,12 @@ def _log_watcher(id: int, stop_event: threading.Event) -> None:
                 time.sleep(0.1) # wait until next line is get written
                 continue
             if message == "END": break # end of the file is marked by the sentinal 'END'
-            logger.info(message)       # write the log message 
-            start_time = time.time()   # reset the wait time, if message is recieved
+            level, _, message = message.partition(':')
+            if level.strip() == "error": 
+                logger.error(message) 
+            else : 
+                logger.info(message) 
+            start_time = time.time() # reset the wait time, if message is recieved
 
     # Since the messages in the process specific log file are written to 
     # the main log file, that file is non longer required - delelting it...
@@ -351,8 +368,14 @@ def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
 
     from math import ceil
 
+    # Galaxy buffer record struct:
+    galaxydata_t = np.dtype([("id"  , "<i8"   ), 
+                             ("pos" , "<f8", 3), 
+                             ("mass", "<f8"   ), 
+                             ("typ" ,  "S1"   )], align = False)
+
     # Size of a galaxy buffer record: i8 (halo id) + 3 x f8 (position) + f8 (mass) + char (type)
-    GBUF_ITEM_SIZE = 41 
+    GBUF_ITEM_SIZE = galaxydata_t.itemsize
 
     # Minimum size limit for a single output data chunk in bytes
     FILE_MIN_SIZE = 1073741824 # 1 GiB
@@ -396,16 +419,16 @@ def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
     # s for satellite).     
     shared_galaxy_file = f"{id}.gbuf.dat"
     galaxy_file_size   = os.path.getsize(shared_galaxy_file) # size of the output file in bytes
-    assert galaxy_file_size % GBUF_ITEM_SIZE == 0            # file check
-    total_items = galaxy_file_size // GBUF_ITEM_SIZE         # total numebr of records
-    chunk_size  = ceil(FILE_MIN_SIZE / GBUF_ITEM_SIZE)  # size of chunk of data (min: 1 GiB)
+    assert galaxy_file_size % GBUF_ITEM_SIZE == 0      # file check
+    total_items = galaxy_file_size // GBUF_ITEM_SIZE   # total numebr of records
+    chunk_size  = ceil(FILE_MIN_SIZE / GBUF_ITEM_SIZE) # size of chunk of data (min: 1 GiB)
 
     args, files_count, n_items = [], 0, 0
     while n_items < total_items:
         start = files_count * chunk_size             # start of the block
         count = min(chunk_size, total_items - start) # size of the block
         fn    = os.path.join(outdir, f"galaxy_info_{files_count:03d}.asdf") # output file 
-        args.append((shared_galaxy_file, start, count, fn, meta))
+        args.append((shared_galaxy_file, galaxydata_t, start, count, fn, meta))
         n_items     += count
         files_count += 1
 
@@ -458,20 +481,15 @@ def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
 
     return
 
-def _write_asdf_chunck(args: tuple[str, int, int, str, dict]) -> tuple[str, int, int]:
+def _write_asdf_chunck(args: tuple[str, np.dtype, int, int, str, dict]) -> tuple[str, int, int]:
     # Write a part of the data as ASDF file. This returns the name of the file
     # written and the number of central and satellite galaxies as. 
     
-    shared_galaxy_file, start, count, fn, meta = args
+    shared_galaxy_file, galaxydata_t, start, count, fn, meta = args
 
     # Loading the galaxy data buffer as a memmap
-    mm = np.memmap(
-        shared_galaxy_file, 
-        dtype  = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8"), ("typ", "S1")], 
-        mode   = 'r', 
-        offset = 0, 
-    )
-    galaxy_buffer = mm[start:start+count] 
+    mm = np.memmap(shared_galaxy_file, dtype = galaxydata_t, mode = 'r', offset = 0)
+    galaxy_buffer = np.array(mm[start:start+count]) 
 
     # Calculating galaxy counts:
     types, counts = np.unique(galaxy_buffer["typ"], return_counts = True)
@@ -702,29 +720,56 @@ if __name__ == "__main__":
         "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
     })
 
-    cli  = galaxy_catalog_generator
-    pmap = inspect.signature(cli).parameters
-    for options, help_string, _type in reversed([
-        (["--simname"     ], "Name of simulation"             , str                        ),
-        (["--redshift"    ], "Redshift value"                 , float                      ),
-        (["--mmin"        ], "Central galaxy threshold mass"  , float                      ),
-        (["--m0"          ], "Satellite galaxy threshold"     , float                      ),
-        (["--m1"          ], "Satellite count amplitude"      , float                      ),
-        (["--sigma-m"     ], "Central galaxy width parameter" , float                      ),
-        (["--alpha"       ], "Satellite power-law count index", float                      ),
-        (["--scale-shmf"  ], "SHMF scale parameter"           , float                      ),
-        (["--slope-shmf"  ], "SHMF slope parameter"           , float                      ),
-        (["--filter-fn"   ], "Filter function for variance"   , Choice(["tophat", "gauss"])),
-        (["--sigma-size"  ], "Size of variance table"         , IntRange(3)                ),
-        (["--output-path" ], "Path to output files"           , Path(file_okay = False)    ),
-        (["--catalog-path"], "Path to catalog files"          , Path(exists    = True )    ),
-        (["--nthreads"    ], "Number of threads to use"       , int                        ),
-    ]):
-        attrs   = { "required": True  }
-        default = pmap.get(options[0].removeprefix('--').replace('-', '_')).default
-        if default is not inspect._empty: 
-            attrs["default"] = default; attrs.pop("required") # optional argument with a default value
-        cli = click.option(*options, type = _type, help = help_string, **attrs)(cli)
-    cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli) 
-    cli = click.command(cli)
-    cli()
+    # cli  = galaxy_catalog_generator
+    # pmap = inspect.signature(cli).parameters
+    # for options, help_string, _type in reversed([
+    #     (["--simname"     ], "Name of simulation"             , str                        ),
+    #     (["--redshift"    ], "Redshift value"                 , float                      ),
+    #     (["--mmin"        ], "Central galaxy threshold mass"  , float                      ),
+    #     (["--m0"          ], "Satellite galaxy threshold"     , float                      ),
+    #     (["--m1"          ], "Satellite count amplitude"      , float                      ),
+    #     (["--sigma-m"     ], "Central galaxy width parameter" , float                      ),
+    #     (["--alpha"       ], "Satellite power-law count index", float                      ),
+    #     (["--scale-shmf"  ], "SHMF scale parameter"           , float                      ),
+    #     (["--slope-shmf"  ], "SHMF slope parameter"           , float                      ),
+    #     (["--filter-fn"   ], "Filter function for variance"   , Choice(["tophat", "gauss"])),
+    #     (["--sigma-size"  ], "Size of variance table"         , IntRange(3)                ),
+    #     (["--output-path" ], "Path to output files"           , Path(file_okay = False)    ),
+    #     (["--catalog-path"], "Path to catalog files"          , Path(exists    = True )    ),
+    #     (["--nthreads"    ], "Number of threads to use"       , int                        ),
+    # ]):
+    #     attrs   = { "required": True  }
+    #     default = pmap.get(options[0].removeprefix('--').replace('-', '_')).default
+    #     if default is not inspect._empty: 
+    #         attrs["default"] = default; attrs.pop("required") # optional argument with a default value
+    #     cli = click.option(*options, type = _type, help = help_string, **attrs)(cli)
+    # cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli) 
+    # cli = click.command(cli)
+    # cli()
+
+
+galaxy_catalog_generator(
+    "AbacusSummit_hugebase_c000_ph000", 
+    3., 
+    2e+12, 
+    2e+12, 
+    2e+13, 
+    output_path="_data/",
+    catalog_path="/home/ms3/Documents/phd/cosmo/workspace/tests/data",
+    rseed=123456,
+    process_id=0,
+    nthreads=1,
+)
+
+# dt = np.dtype([("id"  , "<i8"   ), 
+#                ("pos" , "<f8", 3), 
+#                ("mass", "<f8"   ), 
+#                ("typ" ,  "S1"   )], align = 0)
+# print(dt.itemsize)
+# print(
+#     np.fromfile(
+#         '0.gbuf.dat', 
+#         dt, 
+#         10
+#     )
+# )

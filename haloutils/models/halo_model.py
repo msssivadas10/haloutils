@@ -556,7 +556,14 @@ class hmargs_t(Structure):
             First item is the central galaxy and the remaining are satellites.
         
         """
+        from numpy.lib.recfunctions import structured_to_unstructured
         import time
+
+        galaxydata_t = np.dtype([("id"  , "<i8"   ), 
+                                 ("pos" , "<f8", 3), 
+                                 ("mass", "<f8"   ), 
+                                 ("typ" ,  "S1"   )], align = True)
+        galaxydata_t_p = ndpointer(galaxydata_t, ndim=1, flags="C_CONTIGUOUS")
 
         rstate   = rstate or int( time.time() )
         cgargs_t = self.cgargs_t
@@ -573,7 +580,7 @@ class hmargs_t(Structure):
         lib.setup_catalog_generation.argtypes = [ POINTER(hmargs_t), POINTER(cgargs_t) ]
         lib.setup_catalog_generation.restype  = None
         
-        lib.generate_galaxies.argtypes = [ POINTER(hmargs_t), POINTER(cgargs_t), i8, f8pointer(2) ]
+        lib.generate_galaxies.argtypes = [ POINTER(hmargs_t), POINTER(cgargs_t), i8, galaxydata_t_p ]
         lib.generate_galaxies.restype  = None
         
         remaining = count or 1
@@ -582,9 +589,10 @@ class hmargs_t(Structure):
         while remaining > 0:
             lib.setup_catalog_generation( self.pointer(), args.pointer() )
             generated  = args.n_cen + args.n_sat
-            _gdata_    = np.empty((generated, 4), dtype=np.float64)
+            _gdata_    = np.empty((generated,), dtype=galaxydata_t)
             remaining -= (generated - args.n_cen*(1 - start))
             lib.generate_galaxies( self.pointer(), args.pointer(), generated, _gdata_ )
+            _gdata_    = structured_to_unstructured(_gdata_[["pos", "mass"]])
             gdata.append(_gdata_[start:, :])
             start      = 1
         
