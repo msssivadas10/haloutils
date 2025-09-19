@@ -13,6 +13,7 @@ module galaxy_catalog_mod
 
     private
     public :: setup_catalog_generation, generate_galaxies, generate_galaxy_catalog
+    public :: cgenerate_galaxy_catalog
     
     type, public, bind(c) :: halodata_t
         !! A struct containing data about a halo
@@ -110,8 +111,8 @@ contains
         !! Size of the position and mass array: must be same total number 
         !! of galaxies i.e., `(args%n_cen+args%n_sat)`.
 
-        real(c_double), intent(out) :: gdata(4,n)
-        !! Galaxy positions (columns 1-3) and masses (column 4). 
+        type(galaxydata_t), intent(out) :: gdata(n)
+        !! Galaxy positions and masses. 
 
         integer(c_int64_t) :: i
         real(c_double) :: m_halo, r_halo, c_halo, f, r, theta, phi, Ac, k1, k2, p
@@ -124,11 +125,14 @@ contains
 
         ! Halo has a central galaxy: the position and mass of this galaxy is same
         ! as that of the parent halo.
-        gdata(1:3,1) = args%pos(1:3) ! in Mpc
-        gdata(4  ,1) = m_halo        ! in Msun
+        gdata(1)%typ  = 'c'
+        gdata(1)%pos  = args%pos(1:3) ! in Mpc
+        gdata(1)%mass = m_halo        ! in Msun
 
         if ( args%n_sat < 1 ) return ! No satellite galaxies in this halo
         do i = 1, args%n_sat
+
+            gdata(i+1)%typ  = 's'
             
             ! Assigning random mass values to the satellite galaxies: These masses 
             ! are drown from a bounded pareto distribution, with bounds `m_min` and  
@@ -151,14 +155,14 @@ contains
             phi   = 2*pi*uniform_rv(args%rstate)          !   0 to 2pi
             
             ! Satellite galaxy coordinates x, y, and z in Mpc
-            gdata(1,i+1) = gdata(1,1) + r*sin(theta)*cos(phi)
-            gdata(2,i+1) = gdata(2,1) + r*sin(theta)*sin(phi)
-            gdata(3,i+1) = gdata(3,1) + r*cos(theta)
+            gdata(i+1)%pos(1) = gdata(1)%pos(1) + r*sin(theta)*cos(phi)
+            gdata(i+1)%pos(2) = gdata(1)%pos(2) + r*sin(theta)*sin(phi)
+            gdata(i+1)%pos(3) = gdata(1)%pos(3) + r*cos(theta)
             ! Periodic wrapping of coordinates to stay within the bounding box
-            call periodic_wrap( gdata(1:3,i+1), args%offset(1:3), args%boxsize(1:3) )
+            call periodic_wrap( gdata(i+1)%pos, args%offset, args%boxsize )
             
             ! Satellite galaxy mass in Msun
-            gdata(4,i+1) = gdata(4,1) * f
+            gdata(i+1)%mass = gdata(1)%mass * f
 
         end do
         
@@ -208,220 +212,223 @@ contains
         
     end function nfw_c
 
-! -- For External Use -- 
-! Catalog generation for large catalogs: 
-
-    subroutine generate_galaxy_catalog(fid, seed, nthreads, error) bind(c)
+    subroutine generate_galaxy_catalog(halo_path, glxy_path, fl, hmargs, bbox,       &
+                                       pktab, np, lnma, lnmb, ns, filt, sigma_table, &
+                                       seed, nthreads, error                         &
+        )
         !! Generate a galaxy catalog using the given halo catalog. 
-        !!
-        !! **Notes**:
-        !! 
-        !! This function is basically for use by the Python haloutils package (or 
-        !! by an external C/Python code). So, the inputs passed through shared 
-        !! files only, except the variables that are mostly different each time, 
-        !! like the process ID and no. of threads. But, use from Fortran is also
-        !! possible, if the inputs are passed correctly.
-        !!
-        !! Files required to run this:
-        !! - `fid.vars.dat` containing values for various inputs.
-        !! - `fid.hbuf.dat` containing the halo catalog as stream of `halodata_t`
-        !!
-        !! and, produce the output file:
-        !! - `fid.gbuf.dat` containing the galaxy catalog as stream of `galaxydata_t`
-        !! - `fid.log` (log file)
-        !!    
-        !! Inputs required are:
-        !! - Halo model args as `hmargs_t`...
-        !! - Bounding box `float64` array of shape (3, 2) 
-        !! - Size of the power spectrum table (`int64`)
-        !! - Filter function code (`int`, 0=tophat, 1=gaussian)
-        !! - Size of the variance table (`int64`) 
-        !! - Mass range for calculating variance values (`float64`), and 
-        !! - Power spectrum table, as `float64` array of shape (pktab_size, 2)
-        !! 
-        !! which should appear in the `vars` file in specified order. Also, note that 
-        !! all the arrays are expected to in C order.
-        !!
 
-        integer(c_int64_t), intent(in), value :: fid
-        !! Unique ID for inter process communication. 
-        
-        integer(c_int64_t), intent(in), value :: seed
+        character(4096), intent(in) :: halo_path
+        !! Path to the input halo catalog file: the file must be a binary stream of 
+        !! `halodata_t` records in little endian byteorder.
+
+        character(4096), intent(in) :: glxy_path
+        !! Path to the output galaxy catalog file: the file will be a binary stream 
+        !! of `galaxydata_t` records in little endian byteorder.
+
+        integer(c_int), intent(in) :: fl
+        !! Log file unit: log messages are written to this file.
+
+        type(hmargs_t), intent(in) :: hmargs
+        !! Halo model parameters
+
+        real(c_double), intent(in) :: bbox(3,2)
+        !! Bounding box for the space containing all halos (used for periodic 
+        !! wrapping of galaxy position).
+
+        integer(c_int64_t), intent(in) :: np !! Power spectrum table size
+        real(c_double)    , intent(in) :: pktab(2, np) 
+        !! Matter power spectrum table. First column should be log(k in 1/Mpc) and the 
+        !! second log(power in Mpc^3).
+
+        real(c_double)    , intent(in) :: lnma !! Minimum mass in the table
+        real(c_double)    , intent(in) :: lnmb !! Maximum mass in the table
+        integer(c_int64_t), intent(in) :: ns   !! Size of the internal variance table 
+        integer(c_int)    , intent(in) :: filt !! Filter function for smoothing
+
+        real(c_double), intent(out) :: sigma_table(3, ns)
+        !! Matter variance table calculated from power spectrum, using the given 
+        !! specifications: First 2 columns are log(mass in Msun) and log(sigma). 
+
+        integer(c_int64_t), intent(in) :: seed
         !! Seed value for random number generators
 
-        integer(c_int), intent(in), value :: nthreads
+        integer(c_int), intent(in) :: nthreads
         !! Number of threads to use
 
         integer(c_int), intent(out) :: error
         !! Error code (0=success, 1=error)
 
-        ! Input varables: shared through file
-        real(c_double)     :: bbox(3, 2) !! Bounding box [min, max]
-        type(hmargs_t)     :: hmargs     !! Halo model parameters
-        integer(c_int64_t) :: ns         !! Size of the variance spline
-        integer(c_int64_t) :: chunk_size
-        real(c_double), allocatable :: sigma(:,:)
-        !! A spline for interpolating matter variance as function of mass 
-        !! in Msun (i.e., ln(sigma) as function of ln(m)).
+        integer(c_int)     :: tid, fi, fo, iostat
+        integer(c_int64_t) :: total_halos, processed_halos, n_halos, total_galaxies 
+        integer(c_int64_t) :: chunk_size, rstate(nthreads)
+        type(halodata_t), allocatable :: hbuf(:) ! Halo data
 
-        integer(c_int)     :: tid, fi, fo, fl, ierr
-        integer(c_int64_t) :: rstate(nthreads)
-        integer(c_int64_t) :: total_halos, processed_halos, n_halos, total_galaxies
-        type(halodata_t), allocatable :: hbuf(:)   ! Halo data
-        
-        ! -- SETTING UP -- !
-        fl = 8; call open_logs(fl, fid) ! opening log file
-        
+        error = 1
+
+        ! Creating cubic spline for variance interpolation
+        call make_sigma_table_(hmargs, pktab, np, filt, lnma, lnmb, &
+                               ns, sigma_table                      &
+        ) 
+
         ! Initialising the random number generator. This RNG works on a state 
         ! private to the thread, with a seed offset by the main seed. So, the 
         ! generated RVs should be a different sequence on each thread.
         do tid = 1, nthreads
             call pcg32_init(rstate(tid), seed + 1000*tid)
         end do
-         
+
+        ! Opening the input halo catalog as binary stream and count the number 
+        ! of halos available. Also opens a binary stream for the output galaxies. 
+        call open_fs_(fi, fo, halo_path, glxy_path, total_halos, error, fl)
+        if ( error /= 0 ) return 
+        
         ! Set number of threads
         call omp_set_num_threads(nthreads) 
-        write(fl, '("galaxy catalog generation using ",i0," threads")') nthreads
+        write(fl, '(a,i0,a)') 'info: catalog generation using ',nthreads,' threads'
 
         ! Setting the chunk size multiple of no. of threads, so that halos are 
         ! assigned evenly over multiple threads.
         chunk_size = nthreads*1000 
         allocate( hbuf(chunk_size) ) ! allocate halo data buffer
 
-        ! -- CATALOG GENERATION (MULTI-THREADED) -- !
-
-        ! Loading input variables from the shared workspace file
-        call load_shared_data(fid, bbox, hmargs, ns, sigma)
-
-        ! Opening I/O files:
-        fo =  9; call open_stream(fo, fid, 'gbuf', 'w') ! catalog output file 
-        fi = 10; call open_stream(fo, fid, 'hbuf', 'r') ! halo catalog file
-
-        ! Get no. of halos in the catalog file:
-        call get_halo_count(fi, total_halos) 
-        write(fl, '("found ",i0," halos...")') total_halos
-        
         ! Loading halo data a chunks from the input file
-        processed_halos = 0
-        total_galaxies  = 0 ! number of galaxies generated so far
+        processed_halos = 0 ! number of halos used 
+        total_galaxies  = 0 ! number of galaxies generated
         do while ( processed_halos < total_halos )
             
             ! Loading halos
             n_halos = min(chunk_size, total_halos - processed_halos) ! actual chunk size 
-            read(fi, iostat=ierr) hbuf(1:n_halos)
-            if ( ierr /= 0 ) exit
+            read(fi, iostat=iostat) hbuf(1:n_halos)
+            if ( iostat /= 0 ) exit
 
             ! Generating galaxies 
-            call generate_galaxy_catalog2(hbuf(1:n_halos), n_halos, sigma, ns, & 
-                                          bbox, hmargs, fo, nthreads, rstate,  &
-                                          total_galaxies                       &
+            call distribute_catgen_(hbuf(1:n_halos), n_halos, sigma_table, ns, bbox, &
+                                    hmargs, rstate, fo, nthreads, total_galaxies     &
             )
-            
             processed_halos = processed_halos + n_halos
-            write(fl, '("generated ",i0," galaxies from ",i0," halos '//        &
-                      '(remaining: ",i0,", completed: ",f5.2,"%)")'             &
-            )   total_galaxies, processed_halos, total_halos - processed_halos, &
-                100*dble(processed_halos)/dble(total_halos)
+
+            write(fl, '(a,3(i0,a),f0.2,a)') 'info: generated ',                 &
+                total_galaxies, ' galaxies from ', processed_halos, ' halos, ', &
+                total_halos - processed_halos, ' remaining, ',                  &
+                100*dble(processed_halos)/dble(total_halos), '% completed'
             
         end do
 
-        ! Finialize:
-        deallocate( hbuf, sigma )
-        call close_stream(fi); call close_stream(fo); call close_logs(fl) ! close files
-        
-        error = 0 ! everything worked as expected :)
+        deallocate( hbuf )
+        close(fi); close(fo) ! close files
+
+        error = 0
 
     end subroutine generate_galaxy_catalog
 
-    subroutine load_shared_data(fid, bbox, hmargs, ns, sigma)
-        !! Load the shared data from workspace file.
+    subroutine make_sigma_table_(hmargs, pktab, np, filt, lnma, lnmb, ns, sigma_table)
+        !! Generate the variance table from the given power spectrum table.
 
-        integer(c_int64_t), intent(in)  :: fid   
-        type(hmargs_t)    , intent(out) :: hmargs
-        real(c_double)    , intent(out) :: bbox(3,2)
-        integer(c_int64_t), intent(out) :: ns
-        real(c_double)    , intent(out), allocatable :: sigma(:,:)
+        type(hmargs_t)    , intent(in)  :: hmargs
+        integer(c_int64_t), intent(in)  :: np, ns 
+        integer(c_int)    , intent(in)  :: filt 
+        real(c_double)    , intent(in)  :: lnma, lnmb, pktab(2,np)  
+        real(c_double)    , intent(out) :: sigma_table(3,ns)
 
-        integer(c_int)     :: fi, filt 
-        integer(c_int64_t) :: i, pktab_size 
-        real(c_double)     :: lnma, lnmb, lnm, delta_lnm, lnr, var
-        real(c_double), allocatable :: pktab(:,:)  
-
-        fi = 7; call open_stream(fi, fid, "vars", 'r') ! file unit for input
-
-        ! The shared workspace memory is expected to have the following layout:
-        read(fi) hmargs      ! first, the halo model args as `hmargs_t`...
-        read(fi) bbox        ! then, the bounding box: float64, shape(3, 2), C order...
-        read(fi) pktab_size  ! then, size of the power spectrum table: int64...
-        read(fi) filt        ! then, filter function code: int (0=tophat, 1=gaussian)
-        read(fi) ns          ! then, size of the sigma table: int64 
-        read(fi) lnma, lnmb  ! then, mass range for calculating sigma values (float64) 
-        
-        ! Finally, power spectrum table, as float64 array of shape (pktab_size, 2), 
-        ! in C order...
-        allocate( pktab(2, pktab_size) )
-        do i = 1, pktab_size
-            read(fi) pktab(1:2, i)
-        end do
+        real(c_double)     :: delta, lnm, lnr, var
+        integer(c_int64_t) :: i
 
         ! Calculating the sigma table using the given power spectrum table 
-        allocate( sigma(3, ns) )
-        delta_lnm = (lnmb - lnma) / (ns - 1._c_double)
-        lnm       = lnma
+        delta = (lnmb - lnma) / (ns - 1._c_double)
+        lnm   = lnma
         do i = 1, ns
             lnr = lagrangian_r(hmargs, lnm)
-            var = variance( lnr, 0_c_int, 0_c_int, filt, pktab, pktab_size, 2_c_int )
-            sigma(:, i) = [ lnm, 0.5_c_double*log(var) ]
-            lnm = lnm + delta_lnm
+            var = variance( lnr, 0_c_int, 0_c_int, filt, pktab, np, 2_c_int )
+            sigma_table(1,i) = lnm
+            sigma_table(2,i) = 0.5_c_double * log(var)
+            lnm              = lnm + delta
         end do
-        call generate_cspline(ns, sigma) ! creating cubic spline for interpolation
-
-        deallocate( pktab ) 
-        call close_stream(fi)
         
-    end subroutine load_shared_data
+        ! Creating cubic spline for interpolation
+        call generate_cspline(ns, sigma_table) 
 
-    subroutine generate_galaxy_catalog2(hbuf, n_halos, sigma, ns, bbox, hmargs, &
-                                        fo, nthreads, rstate, ngals             &
+    end subroutine make_sigma_table_
+
+    subroutine open_fs_(fi, fo, halo_path, glxy_path, total_halos, error, fl)
+        !! Open a halo catalog file as binary stream of `halodata_t` records, and
+        !! count the number of halos available in the catalog. Also open a binary 
+        !! stream for the output (`galaxydata_t` records).
+
+        character(4096)   , intent(in)  :: halo_path, glxy_path
+        integer(c_int)    , intent(in)  :: fl
+        integer(c_int)    , intent(out) :: fi, fo, error
+        integer(c_int64_t), intent(out) :: total_halos
+
+        integer(c_int64_t) :: file_size_bytes
+        integer(c_int64_t), parameter :: item_size_bytes = c_sizeof(halodata_t( &
+            0_c_int64_t,                                                        &
+            [ 0._c_double, 0._c_double, 0._c_double ],                          &
+            0._c_double                                                         &   
+        )) !! Size of `halodata_t`: should be 40
+
+        ! Open halo catalog file:
+        fi = 10
+        open(newunit=fi, file=trim(halo_path), access='stream', form='unformatted', &
+             convert='little_endian', status='old', action='read', iostat=error     &
         )
-        !! Generate galaxy catalog from halo catalog.
+        if ( error /= 0 ) then
+            write(fl,'(a,a)') "error: failed to open file: ",trim(halo_path)
+            return
+        end if
+        
+        ! Get the number of halos from the file: since the input file is expected 
+        ! to be a binary stream of `halodata_t` (size: 40 bytes), number of halos
+        ! in the file can be calculated as `file_size_bytes / item_size_bytes` 
+        inquire(fi, size=file_size_bytes)
+        total_halos = file_size_bytes / item_size_bytes
+
+        ! Open galaxy catalog file:
+        fo = 11
+        open(newunit=fo, file=trim(glxy_path), access='stream', form='unformatted',  &
+             convert='little_endian', status='replace', action='write', iostat=error &
+        )
+        if ( error /= 0 ) then
+            write(fl,'(a,a)') "error: failed to open file: ",trim(glxy_path)
+            return
+        end if
+        
+        write(fl,'(a,i0,a,a)') "info: found ",total_halos," halos in ",trim(halo_path)
+        
+    end subroutine open_fs_
+
+    subroutine distribute_catgen_(hbuf, n_halos, sigma, ns, bbox, hmargs, &
+                                  rstate, fo, nthreads, ngals             &
+        )
+        !! Generate galaxy catalog from the given halo data in parallel.
 
         type(halodata_t)  , intent(in)    :: hbuf(n_halos)   
-        integer(c_int64_t), intent(in)    :: n_halos
-        real(c_double)    , intent(in)    :: sigma(3,ns)
-        integer(c_int64_t), intent(in)    :: ns
-        real(c_double)    , intent(in)    :: bbox(3,2)
         type(hmargs_t)    , intent(in)    :: hmargs
-        integer(c_int)    , intent(in)    :: fo   
-        integer(c_int)    , intent(in)    :: nthreads
+        integer(c_int64_t), intent(in)    :: n_halos, ns
         integer(c_int64_t), intent(inout) :: rstate(nthreads), ngals
+        integer(c_int)    , intent(in)    :: fo, nthreads
+        real(c_double)    , intent(in)    :: sigma(3,ns), bbox(3,2)
 
-        integer(c_int64_t), parameter :: buffer_size = 10000
-
+        integer(c_int)     :: nts, tid
+        integer(c_int64_t) :: istart, istop, i, n, gsize 
         type(cgargs_t)     :: args 
-        integer(c_int)     :: nt, tid
-        integer(c_int64_t) :: ng_thread(nthreads), istart, istop, i, ng, nh, p 
-        integer(c_int64_t), allocatable :: meta(:,:) ! Halo index and galaxy count 
-        real(c_double)    , allocatable :: gbuf(:,:) ! Galaxy position and mass
+        type(galaxydata_t), allocatable :: gbuf(:) ! Galaxy position and mass
+        integer(c_int64_t), parameter   :: buffer_size = 10000
 
-        ng_thread(1:nthreads) = 0_c_int64_t ! number of galaxies generated in a thread
+        !$omp parallel private(nts, tid, istart, istop, i, gbuf, n, gsize, args)
 
-        !$omp parallel &
-        !$omp private(nt, tid, istart, istop, i, gbuf, ng, nh, p, args)
-
-        nt  = omp_get_num_threads() ! no. of threads (should be same as `nthreads`)
+        nts = omp_get_num_threads() ! no. of threads (should be same as `nthreads`)
         tid = omp_get_thread_num()  ! thread ID
-        call get_block_range(n_halos, tid, nt, istart, istop)
+        call get_block_(n_halos, tid, nts, istart, istop)
 
         args%rstate       = rstate(tid+1) ! set RNG state
         args%boxsize(1:3) = bbox(1:3,2) - bbox(1:3,1) 
         args%offset(1:3)  = bbox(1:3,1) 
 
         ! Allocate galaxy buffer and metadata: 
-        allocate( gbuf(4,buffer_size), meta(2,buffer_size) ) 
+        allocate( gbuf(buffer_size) ) 
 
-        p  = 0 ! size of data buffer: index to append is p+1
-        nh = 0 ! size of metadata buffer: number of halos with galaxies
+        gsize = 0 ! size of data buffer: index to append is gsize+1
         do i = istart, istop
 
             ! Copy halo data to local args
@@ -432,162 +439,41 @@ contains
             ! Setting up 
             call setup_catalog_generation(hmargs, args)
 
-            ng = args%n_cen + args%n_sat ! total number of galaxies in this halo 
-            if ( ng < 1 ) cycle
+            n = args%n_cen + args%n_sat ! total number of galaxies in this halo 
+            if ( n < 1 ) cycle
             
-            if ( p + ng  <= buffer_size ) then
+            if ( gsize + n  <= buffer_size ) then
                 ! Local buffer has not enough data for saving the new galaxy data:
                 ! Current data is written to the main output buffer and the start 
                 ! pointers are restted to the start. 
 
                 !$omp critical
-                call flush_to_buffer( fo, nh, p, meta, gbuf, buffer_size )
+                call flush_to_buffer_( fo, gsize, ngals, gbuf(1:gsize) )
                 !$omp end critical
             end if    
             
             ! Generating the galaxies
-            call generate_galaxies( hmargs, args, ng, gbuf(1:4,p+1:p+ng) )
-            
-            meta(:,nh+1)     = [ hbuf(i)%id, ng ]
-            nh               = nh + 1
-            p                = p  + ng
-            ng_thread(tid+1) = ng_thread(tid+1) + ng
+            gbuf(gsize+1:gsize+n)%halo_id = hbuf(i)%id ! assign parent halo
+            call generate_galaxies( hmargs, args, n, gbuf(gsize+1:gsize+n) )
+
+            gsize = gsize + n
         end do        
-        if ( nh > 0 ) then ! write remaining data to the buffer...
+        if ( gsize > 0 ) then ! write remaining data to the buffer...
             !$omp critical
-            call flush_to_buffer( fo, nh, p, meta, gbuf, buffer_size )
+            call flush_to_buffer_( fo, gsize, ngals, gbuf(1:gsize) )
             !$omp end critical
         end if 
-        deallocate(gbuf, meta)
+
+        deallocate(gbuf)
 
         ! Save final RNG state for continuing the sequence for next chunk
         rstate(tid+1) = args%rstate 
 
         !$omp end parallel
 
-        ngals = ngals + sum(ng_thread) ! total number of galaxies generated so far...
-        
-    end subroutine generate_galaxy_catalog2
+    end subroutine distribute_catgen_
 
-    subroutine flush_to_buffer(fo, halo_count, galaxy_count, meta, gbuf, bufsize)
-        !! Append galaxy catalog data to the output buffer. 
-        !! NOTE: in distributed case, use with `omp critical` lock.
-
-        integer(c_int)    , intent(in)    :: fo
-        integer(c_int64_t), intent(inout) :: halo_count, galaxy_count
-        integer(c_int64_t), intent(in)    :: bufsize, meta(2,bufsize)
-        real(c_double)    , intent(in)    :: gbuf(4,bufsize)
-
-        integer(c_int64_t) :: i, offset, p, gal_count, halo_id
-
-        offset = 1
-        do i = 1, halo_count
-            halo_id   = meta(1,i) 
-            gal_count = meta(2,i) ! no. of galaxies for this halo
-
-            ! First item in each block is the central galaxy...
-            write(fo) halo_id, gbuf(1:4,offset), 'c'
-            
-            ! Remaining items are for satellite galaxy...
-            do p = offset+1, offset + gal_count
-                write(fo) halo_id, gbuf(1:4,p), 's' 
-            end do
-            offset = offset + gal_count
-        end do
-
-        ! Reset buffers:
-        halo_count   = 0
-        galaxy_count = 0
-
-    end subroutine flush_to_buffer
-
-! Helper functions:
-
-    subroutine open_logs(fu, fid)
-        !! Open a log file (plain text).
-
-        integer(c_int)    , intent(inout) :: fu
-        integer(c_int64_t), intent(in)    :: fid
-
-        integer(c_int) :: error
-        character(256) :: fn
-
-        write(fn, '(i0,".log")') fid ! filename for logs
-        open(newunit=fu, file=fn, status="replace", action="write", &
-             iostat=error                                           &
-        ) ! log file
-        if ( error /= 0 ) stop "error: cannot open log file"     
-        
-    end subroutine open_logs
-
-    subroutine close_logs(fu)
-        !! Close log file.
-        integer(c_int), intent(inout) :: fu
-    
-        ! Sending a sentinal to mark the end of log file
-        write(fu, '(a)') 'END' 
-        close(fu)
-
-    end subroutine close_logs
-
-    subroutine open_stream(fu, fid, suffix, mode)
-        !! Open a binary stream with little endian byteorder.
-
-        character(len=4)  , intent(in)    :: suffix
-        character(len=1)  , intent(in)    :: mode
-        integer(c_int)    , intent(inout) :: fu
-        integer(c_int64_t), intent(in)    :: fid
-        
-        integer(c_int) :: error
-        character(256) :: fn
-
-        write(fn,'(i0,".",a,".dat")') trim(suffix), fid ! filename
-        select case( mode )
-        case ( 'r' )
-            ! Open in read mode
-            open(newunit=fu, file=fn, access='stream', form='unformatted', &
-                 convert='little_endian', status='old', action='read',     &
-                 iostat=error                                              &
-            )
-        case ( 'w' )
-            ! Open in write mode
-            open(newunit=fu, file=fn, access='stream', form='unformatted',  &
-                 convert='little_endian', status='replace', action='write', &
-                 iostat=error                                               &
-            )
-        end select
-        if ( error /= 0 ) stop "error: cannot open file: "//trim(fn) 
-        
-    end subroutine open_stream
-
-    subroutine close_stream(fu)
-        !! Close a binary file.
-        integer(c_int), intent(inout) :: fu
-        close(fu)
-    end subroutine close_stream
-
-    subroutine get_halo_count(fi, total_halos)
-        !! Get the number of halos from the input catalog.
-
-        integer(c_int)    , intent(in) :: fi
-        integer(c_int64_t), intent(out) :: total_halos
-
-        integer(c_int64_t) :: file_size_bytes
-        integer(c_int64_t), parameter :: item_size_bytes = c_sizeof(halodata_t( &
-            0_c_int64_t,                                                        &
-            [ 0._c_double, 0._c_double, 0._c_double ],                          &
-            0._c_double                                                         &   
-        )) !! Size of `halodata_t`: should be 40
-
-        ! Get the number of halos from the file: since the input file is expected 
-        ! to be a binary stream of `halodata_t` (size: 40 bytes), number of halos
-        ! in the file can be calculated as `file_size_bytes / item_size_bytes` 
-        inquire(fi, size=file_size_bytes)
-        total_halos = file_size_bytes / item_size_bytes
-        
-    end subroutine get_halo_count
-
-    subroutine get_block_range(total_size, tid, nthreads, istart, istop)
+    subroutine get_block_(total_size, tid, nthreads, istart, istop)
         !! Get bounds for a block allotted to a thread in a distributed calculation. 
 
         integer(c_int)    , intent(in)  :: tid, nthreads
@@ -609,6 +495,100 @@ contains
         istop  = istart + isize - 1
         if (tid < rem) istop = istop + 1
         
-    end subroutine get_block_range
+    end subroutine get_block_
+
+    subroutine flush_to_buffer_(fo, current_size, total_size, gbuf)
+        !! Append galaxy catalog data to the output buffer. NOTE: in distributed case, 
+        !! use with `omp critical` lock for thread safety.
+
+        integer(c_int)    , intent(in)    :: fo
+        integer(c_int64_t), intent(inout) :: current_size, total_size
+        type(galaxydata_t), intent(in)    :: gbuf(current_size)
+
+        integer(c_int64_t) :: i
+
+        if ( current_size < 1 ) return 
+        do i = 1, current_size
+            write(fo) gbuf(i)%halo_id, gbuf(i)%pos, gbuf(i)%mass, gbuf(i)%typ
+        end do
+        
+        ! Total no. of records in the buffer so far 
+        total_size = total_size + current_size 
+        
+        ! Reset buffer 
+        current_size = 0
+
+    end subroutine flush_to_buffer_
+
+! Wrapper for C/Python
+
+    subroutine cgenerate_galaxy_catalog(pid, seed, nthreads, error) bind(c)
+        !! Generate a galaxy catalog using the given halo catalog. (Wrapper around 
+        !! `generate_galaxy_catalog` for use from C/Python)
+
+        integer(c_int64_t), intent(in), value :: pid
+        !! Unique ID for inter process communication. 
+        
+        integer(c_int64_t), intent(in), value :: seed
+        !! Seed value for random number generators
+
+        integer(c_int), intent(in), value :: nthreads
+        !! Number of threads to use
+
+        integer(c_int), intent(out) :: error
+        !! Error code (0=success, 1=error)
+
+        character(256)     :: pipefn
+        character(4096)    :: halo_path, glxy_path, logs_path
+        type(hmargs_t)     :: hmargs
+        integer(c_int)     :: fp, filt
+        integer(c_int64_t) :: ns, np, i
+        real(c_double)     :: bbox(3,2), lnma, lnmb
+        real(c_double), allocatable :: sigma_table(:,:), pktab(:,:)
+
+
+        ! Step 1: Open a data pipeline:
+        fp = 9
+        write(pipefn, '(i0,".vars.dat")') pid ! Data pipeline name
+        open(newunit=fp, file=trim(pipefn), access='stream', form='unformatted', &
+             convert='little_endian', status='old', action='read', iostat=error  &
+        )
+        if ( error /= 0 ) stop "error: cannot access pipeline"
+
+        ! Step 2: get the input values from the pip
+        read(fp) halo_path  ! first the halo catalog path: string of size 4096
+        read(fp) glxy_path  ! then the galaxy catalog path: string of size 4096
+        read(fp) logs_path  ! then the log file path: string of size 4096
+        read(fp) hmargs     ! then, the halo model args as `hmargs_t`...
+        read(fp) bbox       ! then, the bounding box...
+        read(fp) np         ! then, size of the power spectrum table...
+        read(fp) filt       ! then, filter function code (0=tophat, 1=gaussian)...
+        read(fp) ns         ! then, size of the sigma table...
+        read(fp) lnma, lnmb ! then, mass range for calculating sigma values... 
+        ! Finally, power spectrum table, as float64 array of shape (np, 2), 
+        ! in C order...
+        allocate( pktab(2, np), sigma_table(3, ns) )
+        do i = 1, np
+            read(fp) pktab(1:2, i)
+        end do
+        close(fp)
+
+        ! Opening log file:
+        fp = 9
+        open(newunit=fp, file=trim(logs_path), status="replace", action="write", iostat=error) ! log file
+        if ( error /= 0 ) stop "error: cannot open log file"    
+        
+        ! Step 3: generate galaxy catalog
+        call generate_galaxy_catalog(halo_path, glxy_path,  fp, hmargs, bbox,      &
+                                     pktab, np, lnma, lnmb, ns, filt, sigma_table, &
+                                     seed, nthreads, error                         &
+        )
+        
+        ! Final step:
+        deallocate( pktab, sigma_table ) 
+        write(fp, '(a)') "END" ! Sending a sentinal to mark the end of log section
+        close(fp)
+        
+    end subroutine cgenerate_galaxy_catalog
 
 end module galaxy_catalog_mod
