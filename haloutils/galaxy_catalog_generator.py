@@ -9,7 +9,7 @@ __version__ = "0.1a"
 
 import numpy as np
 import numpy.ctypeslib as npct, ctypes as ct
-import os, os.path, glob, re, json, logging, asdf, time
+import os, os.path, glob, re, json, logging, asdf, time, click
 import threading, multiprocessing
 from typing import Literal
 
@@ -528,8 +528,23 @@ def _clean_up(id: int) -> None:
 
     return
 
+@click.version_option(__version__, message = "%(prog)s v%(version)s")
+@click.option("--simname"     , help="Name of simulation"             , required=True    , type=str                              )
+@click.option("--redshift"    , help="Redshift value"                 , required=True    , type=float                            )
+@click.option("--mmin"        , help="Central galaxy threshold mass"  , required=True    , type=float                            )
+@click.option("--m0"          , help="Satellite galaxy threshold"     , required=True    , type=float                            )
+@click.option("--m1"          , help="Satellite count amplitude"      , required=True    , type=float                            )
+@click.option("--sigma-m"     , help="Central galaxy width parameter" ,  default=0.      , type=float                            )
+@click.option("--alpha"       , help="Satellite power-law count index",  default=1.      , type=float                            )
+@click.option("--scale-shmf"  , help="SHMF scale parameter"           ,  default=0.5     , type=float                            )
+@click.option("--slope-shmf"  , help="SHMF slope parameter"           ,  default=2.      , type=float                            )
+@click.option("--filter-fn"   , help="Filter function for variance"   ,  default="tophat", type=click.Choice(["tophat", "gauss"]))
+@click.option("--sigma-size"  , help="Size of variance table"         ,  default=101     , type=int                              )
+@click.option("--output-path" , help="Path to output files"           ,  default='.'     , type=click.Path(file_okay = False)    )
+@click.option("--catalog-path", help="Path to catalog files"          ,  default='.'     , type=click.Path(exists    = True )    )
+@click.option("--nthreads"    , help="Number of threads to use"       ,  default=-1      , type=int                              )
 def galaxy_catalog_generator(
-        simname      : str,
+        simname      : str,   
         redshift     : float,
         mmin         : float, 
         m0           : float,
@@ -683,9 +698,7 @@ def galaxy_catalog_generator(
 
 if __name__ == "__main__":
 
-    import click, logging.config, warnings, inspect
-    from click import Choice, IntRange, Path
-
+    import logging.config, warnings
     warnings.catch_warnings(action = "ignore")
     
     def get_log_filename(): 
@@ -719,30 +732,5 @@ if __name__ == "__main__":
         }, 
         "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
     })
-
-    cli  = galaxy_catalog_generator
-    pmap = inspect.signature(cli).parameters
-    for options, help_string, _type in reversed([
-        (["--simname"     ], "Name of simulation"             , str                        ),
-        (["--redshift"    ], "Redshift value"                 , float                      ),
-        (["--mmin"        ], "Central galaxy threshold mass"  , float                      ),
-        (["--m0"          ], "Satellite galaxy threshold"     , float                      ),
-        (["--m1"          ], "Satellite count amplitude"      , float                      ),
-        (["--sigma-m"     ], "Central galaxy width parameter" , float                      ),
-        (["--alpha"       ], "Satellite power-law count index", float                      ),
-        (["--scale-shmf"  ], "SHMF scale parameter"           , float                      ),
-        (["--slope-shmf"  ], "SHMF slope parameter"           , float                      ),
-        (["--filter-fn"   ], "Filter function for variance"   , Choice(["tophat", "gauss"])),
-        (["--sigma-size"  ], "Size of variance table"         , IntRange(3)                ),
-        (["--output-path" ], "Path to output files"           , Path(file_okay = False)    ),
-        (["--catalog-path"], "Path to catalog files"          , Path(exists    = True )    ),
-        (["--nthreads"    ], "Number of threads to use"       , int                        ),
-    ]):
-        attrs   = { "required": True  }
-        default = pmap.get(options[0].removeprefix('--').replace('-', '_')).default
-        if default is not inspect._empty: 
-            attrs["default"] = default; attrs.pop("required") # optional argument with a default value
-        cli = click.option(*options, type = _type, help = help_string, **attrs)(cli)
-    cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli) 
-    cli = click.command(cli)
-    cli()
+    galaxy_catalog_generator = click.command( galaxy_catalog_generator )
+    galaxy_catalog_generator()

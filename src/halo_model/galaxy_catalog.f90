@@ -505,12 +505,14 @@ contains
         integer(c_int64_t), intent(inout) :: current_size, total_size
         type(galaxydata_t), intent(in)    :: gbuf(current_size)
 
-        integer(c_int64_t) :: i
 
         if ( current_size < 1 ) return 
-        do i = 1, current_size
-            write(fo) gbuf(i)%halo_id, gbuf(i)%pos, gbuf(i)%mass, gbuf(i)%typ
-        end do
+
+        ! Writing as block of galaxydata_t records
+        write(fo) gbuf
+        ! NOTE: check if the written records include padding bytes (size with padding 48, 
+        ! size without padding 41). Numpy dtype in the app assuming no padding - check
+        ! if correct.
         
         ! Total no. of records in the buffer so far 
         total_size = total_size + current_size 
