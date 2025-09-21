@@ -14,6 +14,8 @@ module galaxy_catalog_mod
     private
     public :: setup_catalog_generation, generate_galaxies, generate_galaxy_catalog
     public :: cgenerate_galaxy_catalog
+
+    integer, parameter :: PATH_LEN = 1024
     
     type, public, bind(c) :: halodata_t
         !! A struct containing data about a halo
@@ -218,11 +220,11 @@ contains
         )
         !! Generate a galaxy catalog using the given halo catalog. 
 
-        character(4096), intent(in) :: halo_path
+        character(PATH_LEN), intent(in) :: halo_path
         !! Path to the input halo catalog file: the file must be a binary stream of 
         !! `halodata_t` records in little endian byteorder.
 
-        character(4096), intent(in) :: glxy_path
+        character(PATH_LEN), intent(in) :: glxy_path
         !! Path to the output galaxy catalog file: the file will be a binary stream 
         !! of `galaxydata_t` records in little endian byteorder.
 
@@ -259,13 +261,14 @@ contains
         integer(c_int), intent(out) :: error
         !! Error code (0=success, 1=error)
 
-        integer(c_int)     :: tid, fi, fo, iostat
+        integer(c_int)     :: tid, fi, fo, iostat, next_progress
         integer(c_int64_t) :: total_halos, processed_halos, n_halos, total_galaxies 
-        integer(c_int64_t) :: chunk_size, rstate(nthreads)
+        integer(c_int64_t) :: remaining_halos, chunk_size, rstate(nthreads)
+        real(c_double)     :: progress
         type(halodata_t), allocatable :: hbuf(:) ! Halo data
 
         error = 1
-
+        
         ! Creating cubic spline for variance interpolation
         call make_sigma_table_(hmargs, pktab, np, filt, lnma, lnmb, &
                                ns, sigma_table                      &
@@ -293,12 +296,14 @@ contains
         allocate( hbuf(chunk_size) ) ! allocate halo data buffer
 
         ! Loading halo data a chunks from the input file
-        processed_halos = 0 ! number of halos used 
+        next_progress   = 5
         total_galaxies  = 0 ! number of galaxies generated
+        processed_halos = 0 ! number of halos used 
+        remaining_halos = total_halos
         do while ( processed_halos < total_halos )
             
             ! Loading halos
-            n_halos = min(chunk_size, total_halos - processed_halos) ! actual chunk size 
+            n_halos = min(chunk_size, remaining_halos) ! actual chunk size 
             read(fi, iostat=iostat) hbuf(1:n_halos)
             if ( iostat /= 0 ) exit
 
@@ -307,12 +312,17 @@ contains
                                     hmargs, rstate, fo, nthreads, total_galaxies     &
             )
             processed_halos = processed_halos + n_halos
-
-            write(fl, '(a,3(i0,a),f0.2,a)') 'info: generated ',                 &
-                total_galaxies, ' galaxies from ', processed_halos, ' halos, ', &
-                total_halos - processed_halos, ' remaining, ',                  &
-                100*dble(processed_halos)/dble(total_halos), '% completed'
+            remaining_halos = remaining_halos - n_halos
+            progress        = 100*dble(processed_halos)/dble(total_halos)
             
+            if ( floor(progress) >= next_progress ) then
+                ! Log messages are written only at 5% increments:
+                write(fl, '(a,3(i0,a),f0.2,a)')                                &
+                    'info: generated ',total_galaxies,' galaxies from ',       &
+                    processed_halos,' halos, ',remaining_halos,' remaining, ', &
+                    progress,'% completed'
+                next_progress = next_progress + 5
+            end if
         end do
 
         deallocate( hbuf )
@@ -355,10 +365,10 @@ contains
         !! count the number of halos available in the catalog. Also open a binary 
         !! stream for the output (`galaxydata_t` records).
 
-        character(4096)   , intent(in)  :: halo_path, glxy_path
-        integer(c_int)    , intent(in)  :: fl
-        integer(c_int)    , intent(out) :: fi, fo, error
-        integer(c_int64_t), intent(out) :: total_halos
+        character(PATH_LEN), intent(in)  :: halo_path, glxy_path
+        integer(c_int)     , intent(in)  :: fl
+        integer(c_int)     , intent(out) :: fi, fo, error
+        integer(c_int64_t) , intent(out) :: total_halos
 
         integer(c_int64_t) :: file_size_bytes
         integer(c_int64_t), parameter :: item_size_bytes = c_sizeof(halodata_t( &
@@ -524,13 +534,46 @@ contains
 
 ! Wrapper for C/Python
 
-    subroutine cgenerate_galaxy_catalog(pid, seed, nthreads, error) bind(c)
+    subroutine cgenerate_galaxy_catalog(halo_path_c, glxy_path_c, logs_path_c, hmargs,     &
+                                        bbox, pktab, np, lnma, lnmb, ns, filt, mrsc_table, & 
+                                        seed, nthreads, error                              &
+        ) bind(c)
         !! Generate a galaxy catalog using the given halo catalog. (Wrapper around 
         !! `generate_galaxy_catalog` for use from C/Python)
 
-        integer(c_int64_t), intent(in), value :: pid
-        !! Unique ID for inter process communication. 
-        
+        character(kind=c_char), intent(in) :: halo_path_c(*)
+        !! Path to the input halo catalog file: the file must be a binary stream of 
+        !! `halodata_t` records in little endian byteorder.
+
+        character(kind=c_char), intent(in) :: glxy_path_c(*)
+        !! Path to the output galaxy catalog file: the file will be a binary stream 
+        !! of `galaxydata_t` records in little endian byteorder.
+
+        character(kind=c_char), intent(in) :: logs_path_c(*)
+        !! Path to the log file: log messages are written to this file.
+
+        type(hmargs_t), intent(in) :: hmargs
+        !! Halo model parameters
+
+        real(c_double), intent(in) :: bbox(3,2)
+        !! Bounding box for the space containing all halos (used for periodic 
+        !! wrapping of galaxy position).
+
+        integer(c_int64_t), intent(in), value :: np !! Power spectrum table size
+        real(c_double)    , intent(in)        :: pktab(2, np) 
+        !! Matter power spectrum table. First column should be log(k in 1/Mpc) and the 
+        !! second log(power in Mpc^3).
+
+        real(c_double)    , intent(in), value :: lnma !! Minimum mass in the table
+        real(c_double)    , intent(in), value :: lnmb !! Maximum mass in the table
+        integer(c_int64_t), intent(in), value :: ns   !! Size of the internal variance table 
+        integer(c_int)    , intent(in), value :: filt !! Filter function for smoothing
+
+        real(c_double), intent(out) :: mrsc_table(4, ns)
+        !! A table of halo mass(Msun), lagrangian radius (Mpc), matter variance and halo
+        !! concentration parameter values, in log format. This data can be used for any 
+        !! later calculations.
+
         integer(c_int64_t), intent(in), value :: seed
         !! Seed value for random number generators
 
@@ -540,57 +583,60 @@ contains
         integer(c_int), intent(out) :: error
         !! Error code (0=success, 1=error)
 
-        character(256)     :: pipefn
-        character(4096)    :: halo_path, glxy_path, logs_path
-        type(hmargs_t)     :: hmargs
-        integer(c_int)     :: fp, filt
-        integer(c_int64_t) :: ns, np, i
-        real(c_double)     :: bbox(3,2), lnma, lnmb
-        real(c_double), allocatable :: sigma_table(:,:), pktab(:,:)
+        integer(c_int)      :: fl
+        integer(c_int64_t)  :: i
+        character(PATH_LEN) :: halo_path, glxy_path, logs_path
+        real(c_double), allocatable :: sigma_table(:,:)
 
-
-        ! Step 1: Open a data pipeline:
-        fp = 9
-        write(pipefn, '(i0,".vars.dat")') pid ! Data pipeline name
-        open(newunit=fp, file=trim(pipefn), access='stream', form='unformatted', &
-             convert='little_endian', status='old', action='read', iostat=error  &
-        )
-        if ( error /= 0 ) stop "error: cannot access pipeline"
-
-        ! Step 2: get the input values from the pip
-        read(fp) halo_path  ! first the halo catalog path: string of size 4096
-        read(fp) glxy_path  ! then the galaxy catalog path: string of size 4096
-        read(fp) logs_path  ! then the log file path: string of size 4096
-        read(fp) hmargs     ! then, the halo model args as `hmargs_t`...
-        read(fp) bbox       ! then, the bounding box...
-        read(fp) np         ! then, size of the power spectrum table...
-        read(fp) filt       ! then, filter function code (0=tophat, 1=gaussian)...
-        read(fp) ns         ! then, size of the sigma table...
-        read(fp) lnma, lnmb ! then, mass range for calculating sigma values... 
-        ! Finally, power spectrum table, as float64 array of shape (np, 2), 
-        ! in C order...
-        allocate( pktab(2, np), sigma_table(3, ns) )
-        do i = 1, np
-            read(fp) pktab(1:2, i)
-        end do
-        close(fp)
+        ! Converting the C strings (`const char*`) into fortran strings: Path has a
+        ! maximum length limit (1024 characters), at which it is trimmed. Always make
+        ! sure the string has correct length.  
+        call c_to_f_string(halo_path_c, halo_path)
+        call c_to_f_string(glxy_path_c, glxy_path)
+        call c_to_f_string(logs_path_c, logs_path)
 
         ! Opening log file:
-        fp = 9
-        open(newunit=fp, file=trim(logs_path), status="replace", action="write", iostat=error) ! log file
+        fl = 8
+        open(newunit=fl, file=logs_path, status="replace", action="write", iostat=error) ! log file
         if ( error /= 0 ) stop "error: cannot open log file"    
         
-        ! Step 3: generate galaxy catalog
-        call generate_galaxy_catalog(halo_path, glxy_path,  fp, hmargs, bbox,      &
-                                     pktab, np, lnma, lnmb, ns, filt, sigma_table, &
-                                     seed, nthreads, error                         &
+        allocate( sigma_table(3, ns) )
+
+        ! Generate galaxy catalog
+        call generate_galaxy_catalog(halo_path, glxy_path, fl,                 &
+                                     hmargs, bbox, pktab, np, lnma, lnmb, ns,  &
+                                     filt, sigma_table, seed, nthreads, error  &
         )
-        
+
+        ! Writing additional data - table of halo mass, radius, sigma value
+        ! and concentration parameter to the end of the pipe.
+        do i = 1, ns
+            mrsc_table(1,i) = sigma_table(1,i) ! ln(mass in Msun)
+            mrsc_table(2,i) = lagrangian_r(hmargs, sigma_table(1,i)) ! ln(radius in Mpc)
+            mrsc_table(3,i) = sigma_table(2,i) ! ln(matter variance, sigma)
+            mrsc_table(4,i) = log(halo_concentration(hmargs, exp(sigma_table(2,i)))) ! log(halo concentration) 
+        end do
+
         ! Final step:
-        deallocate( pktab, sigma_table ) 
-        write(fp, '(a)') "END" ! Sending a sentinal to mark the end of log section
-        close(fp)
+        deallocate( sigma_table ) 
+        write(fl, '(a)') "END" ! Sending a sentinal to mark the end of log section
+        close(fl)
         
     end subroutine cgenerate_galaxy_catalog
+
+    subroutine c_to_f_string(cstr, fstr)
+        !! Convert C string (null terminated) to allocatable Fortran string.
+        character(kind=c_char), intent(in)  :: cstr(*) ! incoming C string
+        character(PATH_LEN)   , intent(out) :: fstr
+        integer(c_int64_t) :: n
+
+        ! Scan the c string until a null character or maximum allowed length.
+        fstr = ''
+        n    = 0
+        do while ( cstr(n+1) /= c_null_char .and. n <= PATH_LEN )
+            n = n + 1
+            fstr(n:n) = cstr(n)
+        end do
+    end subroutine c_to_f_string
 
 end module galaxy_catalog_mod
