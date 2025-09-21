@@ -9,76 +9,105 @@ __version__ = "0.1a"
 
 import numpy as np
 import numpy.ctypeslib as npct, ctypes as ct
-import os, os.path, glob, re, json, logging, asdf, time, click
+import os, os.path, glob, re, logging, asdf, time, click
 import threading, multiprocessing
+from collections import namedtuple
 from typing import Literal
 
-# Loading the shared library and setting up the functions
-lib = npct.load_library("libhaloutils", os.path.dirname(__file__))
-lib.cgenerate_galaxy_catalog.argtypes = [ct.c_int64, ct.c_int64, ct.c_int, ct.POINTER(ct.c_int)]
-lib.cgenerate_galaxy_catalog.restype  = None
+# Container for halo model parameters:
+hmargs_t = np.dtype([
+    ( "lnm_min"   ,  "<f8" ),( "sigma_m",  "<f8" ),( "lnm0"      ,  "<f8" ),
+    ( "lnm1"      ,  "<f8" ),( "alpha"  ,  "<f8" ),( "scale_shmf",  "<f8" ), 
+    ( "slope_shmf",  "<f8" ),( "z"      ,  "<f8" ),( "H0"        ,  "<f8" ),
+    ( "Om0"       ,  "<f8" ),( "Delta_m",  "<f8" ),( "dplus"     ,  "<f8" ),
+], align = True)
 
-def _share_data(
-        id            : int,                             # file sharing ID
-        hmargs        : dict,                            # halo model parameters      
-        bounding_box  : tuple[list[float], list[float]], # simulation bounding box       
-        variance_vars : tuple[float, float, int, int],   # (lnma, lnmb, size, filter)
-        pktable       : np.ndarray,                      # power spectrum table: lnk vs lnp
-        data_generator: map,                             # halo data
-        metadata      : dict = {} , 
-    ) -> None:
-    # Save the arguments to a binary file for sharing. 
+# Halo buffer record struct:
+halodata_t = np.dtype([("id", "<i8"),("pos", "<f8", 3),("mass", "<f8")])               
 
-    halo_catalog_file   = f"{id}.hbuf.dat" # Path to the halo catalog file (input)
-    galaxy_catalog_file = f"{id}.gbuf.dat" # Path to the galaxy catalog file (output)
-    log_file            = f"{id}.log"      # Path to the log file
+# Galaxy buffer record struct:
+galaxydata_t = np.dtype([("id", "<i8"),("pos", "<f8", 3),("mass", "<f8"),("typ", "S1")]) 
 
-    PATH_FIXED_LEN  = 4096
-    def _encode_as_fixedlen_string(fn: str) -> bytes:
-        fn_ = fn.ljust( PATH_FIXED_LEN ).encode('utf-8')
-        assert len(fn_) == PATH_FIXED_LEN
-        return fn_
+# A tuple of arguments to the galaxy catalog generation library function:  
+cgargs_t = namedtuple("cgargs_t", 
+    ["halo_path", "glxy_path", "logs_path", "hmargs", "bbox", 
+     "pktab", "pktab_size", "lnma", "lnmb", "sigmatab_size" , 
+     "filt", "mrsc_table", "seed", "nthreads"               ]
+)
 
-    shared_vars_file = f"{id}.vars.dat"
-    with open(shared_vars_file, "wb") as fp:
+# Types of arguments to the galaxy catalog generation library function:
+cgargtypes = cgargs_t(
+    halo_path     = ct.c_char_p, 
+    glxy_path     = ct.c_char_p, 
+    logs_path     = ct.c_char_p, 
+    hmargs        = npct.ndpointer(hmargs_t, 0, flags="C_CONTIGUOUS"),
+    bbox          = npct.ndpointer("f8"    , 2, flags="C_CONTIGUOUS"), 
+    pktab         = npct.ndpointer("f8"    , 2, flags="C_CONTIGUOUS"), 
+    pktab_size    = ct.c_int64, 
+    lnma          = ct.c_double, 
+    lnmb          = ct.c_double, 
+    sigmatab_size = ct.c_int64, 
+    filt          = ct.c_int, 
+    mrsc_table    = npct.ndpointer("f8", 2, flags="C_CONTIGUOUS"),
+    seed          = ct.c_int64,
+    nthreads      = ct.c_int,
+)
 
-        # First block is the halo and galaxy catalog filenames and path to log file as 
-        # 4096 character strings
-        for fn in ( halo_catalog_file, galaxy_catalog_file, log_file ):
-            fp.write( _encode_as_fixedlen_string(fn) )
+############################################################################################################
+#                                             PREPARATION
+############################################################################################################
 
-        # Next block is the halo model parameters as struct `hmargs_t`...
-        hmargs_t = [
-            ( "lnm_min"   ,  "<f8"  ),( "sigma_m"   ,  "<f8"  ),
-            ( "lnm0"      ,  "<f8"  ),( "lnm1"      ,  "<f8"  ),
-            ( "alpha"     ,  "<f8"  ),( "scale_shmf",  "<f8"  ),
-            ( "slope_shmf",  "<f8"  ),( "z"         ,  "<f8"  ),
-            ( "H0"        ,  "<f8"  ),( "Om0"       ,  "<f8"  ),
-            ( "Delta_m"   ,  "<f8"  ),( "dplus"     ,  "<f8"  ),
-        ]
-        np.array(
-            tuple( hmargs.get(field) for field, _ in hmargs_t ), 
-            dtype = np.dtype(hmargs_t, align = True)
-        ).tofile(fp)
+def pack_arguments(
+        work_dir      : str,                 # path to the working directory
+        hmargs        : tuple,               # halo model parameters      
+        bounding_box  : np.ndarray,          # simulation bounding box   
+        mass_range    : tuple[float, float], # mass range for variance table
+        var_tabsize   : int,                 # size of the variance table    
+        filter_code   : int,                 # filter function integer code
+        pktable       : np.ndarray,          # power spectrum table: lnk vs lnp
+        rseed         : int,                 # seed value for random number generation
+        nthreads      : int,                 # no. of threads to use
+        data_generator: map,                 # halo data
+    ) -> cgargs_t:
+    # Pack the arguments for the galaxy generator function in the correct order and
+    # type. Also, create the halo catalog buffer in the correct format. 
 
-        # Next block stores the bounding box in Mpc, size of power spectrum table, 
-        # filter function code, size and mass range for variance table...  
-        lnma, lnmb, table_size, filter_id  = variance_vars
-        np.array(
-            ( bounding_box, pktable.shape[0], filter_id, table_size, lnma, lnmb ),
-            dtype = [("bbox", "<f8", (2, 3)), ("pktab_size", "<i8"), ("filt", "<i4"), 
-                     ("ns"  , "<i8"        ), ("lnma"      , "<f8"), ("lnmb", "<f8"),]
-        ).tofile(fp)
+    bounding_box = np.array(bounding_box, "f8"    ); assert bounding_box.shape == (2, 3)
+    pktable      = np.array(pktable     , "f8"    ); assert pktable.shape[1]   == 2
+    hmargs       = np.array(hmargs      , hmargs_t)
+    lnma, lnmb   = float(mass_range[0]), float(mass_range[1])
+    var_tabsize  = int(var_tabsize)
+    filter_code  = int(filter_code)
+    nthreads     = os.cpu_count()   if nthreads < 1 else int(nthreads)
+    rseed        = int( time.time() if rseed is None else rseed )
 
-        # Last block is the power spectrum table.
-        pktable.astype("<f8").tofile(fp)
+    def encode(string: str): 
+        assert len(string) <= 1024, f"string length exceeds maximum limit: {string}"
+        return string.encode("utf-8")
+
+    # Packing the arguments in correct order:
+    args = cgargs_t(
+        halo_path     = encode(os.path.join(work_dir, f"hbuf.bin")), # Path to the halo catalog file (input) 
+        glxy_path     = encode(os.path.join(work_dir, f"gbuf.bin")), # Path to the galaxy catalog file (output)
+        logs_path     = encode(os.path.join(work_dir, f"log"     )), # Path to the log file
+        hmargs        = hmargs, 
+        bbox          = bounding_box, 
+        pktab         = pktable, 
+        pktab_size    = pktable.shape[0], 
+        lnma          = lnma, 
+        lnmb          = lnmb, 
+        sigmatab_size = var_tabsize, 
+        filt          = filter_code, 
+        mrsc_table    = np.zeros((var_tabsize, 4), "f8"),
+        seed          = rseed, 
+        nthreads      = nthreads
+    ) 
     
     # Save the halo catalog data a binary file for sharing. Passing the halo catalog 
     # data loder as a generator, so that only the needed the data is loaded, making
     # effiicient use of memory. 
-    with open(halo_catalog_file, 'wb') as fp: 
+    with open(args.halo_path, 'wb') as fp: 
         # Data written as a stream of `halodata_t` structs.
-        halodata_t = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8")]
         for halo_id, halo_pos, halo_mass in data_generator:
             n_halos     = np.size(halo_id)
             halo_buffer = np.empty((n_halos, ), dtype = halodata_t)
@@ -87,27 +116,24 @@ def _share_data(
             halo_buffer["mass"] = np.array(halo_mass).astype("<f8", copy = False)
             halo_buffer.tofile(fp)
     
-    # Metadata is saved in JSON format  
-    with open(f"{id}.meta.dat", 'w') as fp: 
-        json.dump(metadata, fp, sort_keys = False, separators = (',', ':'))
+    return args
 
-    return
-
-def _prepare_abacus_workspace(
-        id       : int,       # ID for file sharing 
-        args     : dict,      # Values for halo model and other parameters
-        simname  : str,       # Name of the simulation
-        redshift : float,     # Redshift 
-        loc      : str = ".", # Path to look for halo catalog files
-    ) -> int:
-    # Write shared data for galaxy generation using halos and parameters from 
-    # AbacusSummit simulation. This will return 0 for success and non-zero on 
-    # error.
+def prepare_abacus_workspace(
+        work_dir : str,   # path to the working directory
+        args     : dict,  # Values for halo model and other parameters
+        simname  : str,   # Name of the simulation
+        redshift : float, # Redshift 
+        loc      : str,   # Path to look for halo catalog files
+        rseed    : int,   # seed value for random number generation
+        nthreads : int,   # no. of threads to use
+    ) -> tuple[dict, cgargs_t]:
+    # Prepare the arguments and metadata for catalog generation using abacus summit 
+    # halo catalogs.     
     
     from math import exp
     from numpy.lib.recfunctions import structured_to_unstructured
-    from abacusnbody.data.compaso_halo_catalog import CompaSOHaloCatalog
     from abacusnbody.metadata import get_meta
+    from abacusnbody.data.compaso_halo_catalog import CompaSOHaloCatalog
 
     # Look-up table to get `sigma_8` values used in the abacus summit cosmologies. 
     # This data is not in the catalog headers, so it is taken from documentations
@@ -140,7 +166,7 @@ def _prepare_abacus_workspace(
         meta = get_meta(simname, redshift)
     except ValueError:
         logger.error(f"data for simulation {simname!r} at z={redshift} not availbale.")
-        return -1
+        return
     except Exception:
         logger.exception(f"error getting metadata for simulation {simname!r} at z={redshift}")
     
@@ -149,41 +175,50 @@ def _prepare_abacus_workspace(
     # Linear power spectrum in the metadata is generated by CLASS at a specific 
     # redshift (`ZD_Pk_file_redshift` in the metadata). This data is stored as an 
     # astropy Table as k (h/Mpc) and P (Mpc/h)^3. 
-    h          = meta["H0"] / 100. # Hubble parameter in 100 km/s/Mpc
-    pktab      = structured_to_unstructured(np.array(meta["CLASS_power_spectrum"])) # at z_pk
-    pktab[:,0] = np.log(pktab[:,0]) + np.log(h)   # k in h/Mpc     -> log(k in 1/Mpc)
-    pktab[:,1] = np.log(pktab[:,1]) - np.log(h)*3 # P in (Mpc/h)^3 -> log(P in Mpc^3)
+    pktab = structured_to_unstructured(np.array(meta["CLASS_power_spectrum"])) # at z_pk
 
-    def _get_closest(dct: dict[float, float], target_key: float) -> float:
-        # Get the closest float key given target key, within precision, from a
-        # float->float mapping. 
-        if target_key in dct: return target_key 
-        return next(key for key in dct if abs(target_key - key) < 1e-09)
+    # Growth factor table: since this is a dict of float->float, exact key matching
+    # may not be possible because of precision issues. 
+    dplus_tab = meta['GrowthTable'] 
     
-    # Growth factor is calculated using the GrowthTable in the metadata, and
-    # power spectrum is interpolated using this value. 
-    dplus_tab  = meta['GrowthTable']
-    z_target   = _get_closest( dplus_tab, meta["Redshift"]            )
-    z_pk       = _get_closest( dplus_tab, meta['ZD_Pk_file_redshift'] ) 
-    dplus_at_z = dplus_tab[z_target] / dplus_tab[z_pk] # growth factor at z, w.r.to z_pk
-    pktab[:,1] = pktab[:,1] + 2*np.log(dplus_at_z)     # interpolate power spectrum to z
-    dplus_at_z = dplus_tab[z_target] / dplus_tab[0.0]  # growth factor at z, w.r.to 0
+    # Current redshift and corresponding growth
+    z_target = meta["Redshift"]
+    try:
+        dz_target = dplus_tab[z_target]
+    except KeyError: # get the nearest value within machine precision
+        dz_target = dplus_tab[ next(z for z in dplus_tab if np.allclose(z, z_target)) ]
 
-    # Halo model arguments 
-    hmargs = {
-        "lnm_min"   :  args["lnm_min"   ]   , 
-        "sigma_m"   :  args["sigma_m"   ]   , 
-        "lnm0"      :  args["lnm0"      ]   , 
-        "lnm1"      :  args["lnm1"      ]   ,
-        "alpha"     :  args["alpha"     ]   , 
-        "scale_shmf":  args["scale_shmf"]   , 
-        "slope_shmf":  args["slope_shmf"]   , 
-        "z"         :  meta["Redshift"  ]   ,
-        "H0"        :  meta["H0"        ]   , 
-        "Om0"       :  meta["Omega_M"   ]   , 
-        "Delta_m"   :  meta["SODensity" ][0], 
-        "dplus"     :  dplus_at_z           ,
-    }
+    # Redshift at which power spectrum is calculated and corresponding growth
+    z_pk = meta['ZD_Pk_file_redshift']
+    try:
+        dz_pk = dplus_tab[z_pk]
+    except KeyError: # get the nearest value within machine precision
+        dz_pk = dplus_tab[ next(z for z in dplus_tab if np.allclose(z, z_pk)) ]
+    
+    # Interpolating the power spectrum table to the current redshift using the growth
+    # factors. Also, convetring the table to log format: 
+    h          = meta["H0"] / 100.
+    pktab[:,0] = np.log(pktab[:,0]) + ( np.log(h) )   
+    pktab[:,1] = np.log(pktab[:,1]) - ( np.log(h)*3  + 2*np.log(dz_target / dz_pk) )
+
+    # Growth factor at current redshift, w.r.to present (z=0)
+    dplus_at_z = dz_target / dplus_tab[0.]
+
+    # Halo model arguments as tuple: NOTE: field order must be same as the hmargs_t struct
+    hmargs = (
+        args["lnm_min"   ]   , # lnm_min     
+        args["sigma_m"   ]   , # sigma_m     
+        args["lnm0"      ]   , # lnm0        
+        args["lnm1"      ]   , # lnm1       
+        args["alpha"     ]   , # alpha       
+        args["scale_shmf"]   , # scale_shmf  
+        args["slope_shmf"]   , # slope_shmf  
+        meta["Redshift"  ]   , # z          
+        meta["H0"        ]   , # H0          
+        meta["Omega_M"   ]   , # Om0         
+        meta["SODensity" ][0], # Delta_m     
+        dplus_at_z           , # dplus      
+    )
 
     # Simulation bounding box (values in Mpc): [-boxsize/2, boxsize/2]
     bounding_box_Mpc = [[ -0.5*meta["BoxSizeMpc"] ]*3, [ 0.5*meta["BoxSizeMpc"] ]*3]
@@ -222,7 +257,6 @@ def _prepare_abacus_workspace(
             "scaleSHMF":     args["scale_shmf"] ,
             "slopeSHMF":     args["slope_shmf"] ,
         },
-        "powerSpectrumTable": pktab.tolist(), # saving the powerspectrum also...
     } 
 
     # Filter out only the files with names matchng the pattern and sorting based on 
@@ -244,7 +278,7 @@ def _prepare_abacus_workspace(
     files  = [ files[idx] for idx in sorted(files) ]
     if not files: 
         logger.info(f"no files available for simulation {simname!r} at z={redshift}")
-        return -1
+        return
     
     # Load halo data from the files and add to the shared catalog file.
     logger.info(f"found {len(files)} files for simulation {simname!r} at z={redshift}")
@@ -252,62 +286,67 @@ def _prepare_abacus_workspace(
     def load_abacus_halo_catalog(fn: str):
         logger.info(f"loading halo catalog from file: {fn!r}")
         catalog = CompaSOHaloCatalog(fn, cleaned = False, fields = ["id", "SO_central_particle", "N"])
-
-        h = catalog.header["H0"] / 100. 
-        unit_mass_Msun = catalog.header["ParticleMassMsun"] 
-        
+        h, unit_mass_Msun = catalog.header["H0"] / 100., catalog.header["ParticleMassMsun"] 
         uid  = catalog.halos["id"]                      # halo ID  
         pos  = catalog.halos["SO_central_particle"] / h # halo position coordinates in Mpc
         mass = catalog.halos["N"] * unit_mass_Msun      # halo mass in Msun
         return uid, pos, mass
     
     # Save the values as shared data: 
-    _share_data(
-        id, 
+    cgargs = pack_arguments(
+        work_dir, 
         hmargs, 
         bounding_box_Mpc, 
-        [lnma, lnmb, table_size, filter_id], 
+        (lnma, lnmb), 
+        table_size, 
+        filter_id, 
         pktab, 
+        rseed, 
+        nthreads,
         map(load_abacus_halo_catalog, files), 
-        meta, 
     )
-    return 0
+    return meta, cgargs
 
-def _prepare_workspace(
-        id       : int,       # ID for file sharing 
-        args     : dict,      # Values for halo model and other parameters
-        simname  : str,       # Name of the simulation
-        redshift : float,     # Redshift 
-        loc      : str = ".", # Path to look for halo catalog files
-    ) -> int:
+def prepare_workspace(
+        work_dir : str,   # path to the working directory 
+        args     : dict,  # Values for halo model and other parameters
+        simname  : str,   # Name of the simulation
+        redshift : float, # Redshift 
+        loc      : str,   # Path to look for halo catalog files
+        rseed    : int,   # seed value for random number generation
+        nthreads : int,   # no. of threads to use
+    ) -> tuple[dict, cgargs_t]:
     # Setting up shared data based on simulation. Type of simulation is calculated
     # based on the prefix of its name.
-
     if simname.startswith("AbacusSummit"):
-        error_code = _prepare_abacus_workspace(id, args, simname, redshift, loc)
-    else:
-        raise RuntimeError(f"simulation {simname!r} is not supported")
-    return error_code
+        return prepare_abacus_workspace(work_dir, args, simname, redshift, loc, rseed, nthreads)
+    raise RuntimeError(f"simulation {simname!r} is not supported")
 
-def _generate_galaxies(id: int, nthreads: int = -1, rseed: int = None) -> None:
+############################################################################################################
+#                                           DATA GENERATION
+############################################################################################################
+
+def generate_galaxies(args: cgargs_t) -> int:
     # Generate galaxies using shared halo catalog and parameters. Call this only  
-    # after creating the shared files.  
+    # after creating the shared files. This will return 0 on success and non-zero
+    # on failure. 
     
-    assert os.path.exists( f"{id}.vars.dat" ), "missing shared data file"
-    assert os.path.exists( f"{id}.hbuf.dat" ), "missing shared halo catalog data"
+    # Loading the shared library and setting up the functions
+    lib = npct.load_library("libhaloutils", os.path.dirname(__file__))
+    lib.cgenerate_galaxy_catalog.argtypes = [*cgargtypes, ct.POINTER(ct.c_int)]
+    lib.cgenerate_galaxy_catalog.restype  = None
 
-    if nthreads < 1 : nthreads = os.cpu_count()
-    if rseed is None: rseed    = int( time.time() )    
+    assert os.path.exists( args.halo_path ), "missing shared halo catalog data"    
 
-    stop_event = threading.Event()
-    
     # Start a thread for logging
-    thread = threading.Thread(target = _log_watcher, args = (id, stop_event), daemon = True)
+    stop_event = threading.Event()
+    logs_file  = args.logs_path
+    thread     = threading.Thread(target = _log_watcher, args = (logs_file, stop_event), daemon = True)
     thread.start()
     
     # Galaxy generation
     error_flag = ct.c_int(1) # Error code: non-zero on error 
-    lib.cgenerate_galaxy_catalog(id, rseed, nthreads, ct.byref(error_flag))
+    lib.cgenerate_galaxy_catalog(*args, ct.byref(error_flag))
 
     if error_flag.value != 0:
         logger = logging.getLogger()
@@ -319,177 +358,126 @@ def _generate_galaxies(id: int, nthreads: int = -1, rseed: int = None) -> None:
     # Wait for logging thread to finish
     thread.join()
 
-    return
+    return 0
 
-def _log_watcher(id: int, stop_event: threading.Event) -> None:
+def _log_watcher(logs_file: str, stop_event: threading.Event) -> None:
     # Watch the log file, pass the lines to main log file as they appear.
 
-    logger   = logging.getLogger()
-    log_file = f"{id}.log"  # Filename for log file associated with this process
-    one_day  = 86400        # Seconds in a day
-
-    # Wait until the file is created
+    ONE_DAY      = 86400 # Seconds in a day
+    LOG_SENTINAL = "END" # Sentinal value indicating the end of log buffer
+    
+    # Wait until the file is created, with timeout of one day 
     start_time = time.time()
-    while not os.path.exists(log_file):
+    while not os.path.exists(logs_file):
         if stop_event.is_set(): return
-        if time.time() - start_time > one_day: return # set a wait timeout of 1 day
+        if time.time() - start_time > ONE_DAY: # set a wait timeout of 1 day
+            import warnings
+            warnings.warn("reached timeout for waiting log file: no logs will be written")
+            return 
         time.sleep(0.1)
 
-    with open(log_file, "r") as f:
+    # Redirecting messages from log buffer to main logger
+    with open(logs_file, "r") as f:
+        logger     = logging.getLogger()
         start_time = time.time()
         while not stop_event.is_set():
             message = f.readline().strip()
             if not message: 
-                if time.time() - start_time > one_day: return # set a wait timeout of 1 day
+                if time.time() - start_time > ONE_DAY: # set a wait timeout of 1 day
+                    import warnings
+                    warnings.warn("reached timeout for waiting log message: exiting")
+                    return 
                 time.sleep(0.1) # wait until next line is get written
                 continue
-            if message == "END": break # end of the file is marked by the sentinal 'END'
-            level, _, message = message.partition(':')
-            if level.strip() == "error": 
-                logger.error(message) 
-            else : 
-                logger.info(message) 
-            start_time = time.time() # reset the wait time, if message is recieved
+            if message == LOG_SENTINAL: break # end of the file
 
-    # Since the messages in the process specific log file are written to 
-    # the main log file, that file is non longer required - delelting it...
-    try:
-        logger.info(f"deleting {log_file!r}...")
-        os.remove( log_file )
-        # Exceptions are ignored, with printing a log message for that.
-    except PermissionError:
-        logger.error("failed to delete log file - premission denied")
-    except Exception:
-        logger.exception("error deleting log file.")  
+            # Write log record with correct level:
+            level, _, message = message.partition(':')
+            if level.strip() == "error": logger.error(message) 
+            else : logger.info(message) 
+            
+            # Reset the wait time, if message is recieved
+            start_time = time.time() 
+
     return 
 
-def _save_data_as_asdf(id: int, nthreads: int = -1, path: str = '.') -> None:
-    # Save data from the shared output to ASDF file(s) in the given path. 
+############################################################################################################
+#                                         DATA EXPORT TO ASDF
+############################################################################################################
+
+def export_data_products(
+        cgargs : cgargs_t, # Contains output filename and extra data
+        meta   : dict,     # Metadata to include in the ASDF files as header
+        path   : str ,     # Path to the output folder - files will be in galaxy_info subdir.
+    ) -> None:
+    # Export data from the output buffer to ASDF file(s) in the given path. Also save
+    # some additional data products such as matter power spectrum and variance tables, 
+    # which are useful for later processing.  
 
     from math import ceil
 
-    # Galaxy buffer record struct:
-    galaxydata_t = np.dtype([("id"  , "<i8"   ), 
-                             ("pos" , "<f8", 3), 
-                             ("mass", "<f8"   ), 
-                             ("typ" ,  "S1"   )], align = False)
-
-    # Size of a galaxy buffer record: i8 (halo id) + 3 x f8 (position) + f8 (mass) + char (type)
-    GBUF_ITEM_SIZE = galaxydata_t.itemsize
-
-    # Minimum size limit for a single output data chunk in bytes
-    FILE_MIN_SIZE = 1073741824 # 1 GiB
+    GBUF_REC_SIZE = galaxydata_t.itemsize # Size of a galaxy buffer record
+    FILE_MIN_SIZE = 1073741824            # Minimum size limit for an output data chunk (=1 GiB)
 
     logger = logging.getLogger()
 
-    # Loading metadata, if any. Sonce this file is not needed, after that it is 
-    # deleted. 
-    meta = {}
-    shared_meta_file = f"{id}.meta.dat"
-    if os.path.exists(shared_meta_file):
-        with open(shared_meta_file, 'r') as fp:
-            meta = json.load(fp)
+    galaxy_file = cgargs.glxy_path
+    assert os.path.exists(galaxy_file) and os.path.getsize(galaxy_file) % GBUF_REC_SIZE == 0  # file check
 
     # Folder for saving output ASDF files (create if not exist)
     outdir = os.path.join( os.path.abspath(os.path.expanduser(path)), "galaxy_info" )
     os.makedirs(outdir, exist_ok = True)
     logger.info(f"saving galaxy catalog files to {outdir!r}...")
-
-    # Writing a seperate file containing all items in the metadata: that is,
-    # ndarrays like power spectrum table are stored in specific format in 
-    # this file. These data are then removed from metadata section that is
-    # in the catalog files.
-    fields_to_delete = []
-    if "powerSpectrumTable" in meta: 
-        meta["powerSpectrumTable"] = np.array( 
-            [ (_lnk_, _lnp_) for _lnk_, _lnp_ in meta["powerSpectrumTable"] ], 
-            dtype = [("lnk", "<f8"), ("lnp", "<f8")],
-        )
-        fields_to_delete.append( "powerSpectrumTable" )
-
-    with asdf.AsdfFile(meta) as af: 
-        fn = os.path.join(outdir, "metadata.asdf")
-        af.write_to(fn, all_array_compression = 'zlib')
-    
-    for field in fields_to_delete: _ = meta.pop(field, None) # delete fields
     
     # Loading galaxy data from the binary file and save them in ASDF files: 
     # Each file will store the metadata (header), and the data section contains 
     # position (Mpc), mass (Msun), parent halo ID and galaxy type (c for central, 
-    # s for satellite).     
-    shared_galaxy_file = f"{id}.gbuf.dat"
-    galaxy_file_size   = os.path.getsize(shared_galaxy_file) # size of the output file in bytes
-    assert galaxy_file_size % GBUF_ITEM_SIZE == 0      # file check
-    total_items = galaxy_file_size // GBUF_ITEM_SIZE   # total numebr of records
-    chunk_size  = ceil(FILE_MIN_SIZE / GBUF_ITEM_SIZE) # size of chunk of data (min: 1 GiB)
+    # s for satellite).
+    total_items = os.path.getsize(galaxy_file) // GBUF_REC_SIZE # total numebr of records
+    chunk_size  = ceil(FILE_MIN_SIZE / GBUF_REC_SIZE)           # size of chunk of data (min: 1 GiB)
 
     args, files_count, n_items = [], 0, 0
     while n_items < total_items:
         start = files_count * chunk_size             # start of the block
         count = min(chunk_size, total_items - start) # size of the block
         fn    = os.path.join(outdir, f"galaxy_info_{files_count:03d}.asdf") # output file 
-        args.append((shared_galaxy_file, galaxydata_t, start, count, fn, meta))
+        args.append((galaxy_file, start, count, fn, meta))
         n_items     += count
         files_count += 1
 
-    if nthreads < 1 : nthreads = os.cpu_count()
-    nthreads = min(nthreads, files_count)
-    logger.info(f"exporting data to asdf format ({nthreads} processes)...")
-    with multiprocessing.Pool(processes = nthreads) as pool:
-        # Distributed file export:
+    # Distributed file export:
+    logger.info(f"exporting data to asdf format ({cgargs.nthreads} processes)...")
+    with multiprocessing.Pool(processes = cgargs.nthreads) as pool:
         file_summary = pool.map(_write_asdf_chunck, args)
-
-        # Writing a summary file:
-        with open(os.path.join(outdir, "info.txt"), 'w') as fp: 
-            fp.write( "file_name, central_count, satellite_count, file_size_bytes \n" )
-            for fn, central_count, satellite_count in file_summary:
-                file_size, fn = os.path.getsize(fn), os.path.basename(fn)
-                fp.write(f"{fn}, {central_count}, {satellite_count}, {file_size} \n")
     logger.info(f"written {files_count} galaxy catalog files.")
 
-    # record_size        = np.dtype(dtype).itemsize  # size of a galaxy catalog record in bytes
-    # max_items_per_file = 1073741824 // record_size # maximum number of records (filesize: 1 GiB)
-    # if total_items % max_items_per_file > 0:
-    #     max_items_per_file += 1
-    #
-    # with open(shared_galaxy_file, 'r') as fp:
-    #     i = 0
-    #     total_items_loaded = 0
-    #     while True:
-    #         galaxy_buffer = np.fromfile(
-    #             fp, 
-    #             dtype = [("id", "<i8"), ("pos", "<f8", 3), ("mass", "<f8"), ("typ", "S1")], 
-    #             count = max_items_per_file,
-    #         )
-    #         if galaxy_buffer.shape[0] < 1: break
-    #         total_items_loaded += galaxy_buffer.shape[0]
-    #
-    #         with asdf.AsdfFile({
-    #             "header" : meta, 
-    #             "data"   : {
-    #                 "parentHaloID"   : galaxy_buffer["id"  ], 
-    #                 "galaxyPosition" : galaxy_buffer["pos" ], 
-    #                 "galaxyMass"     : galaxy_buffer["mass"], 
-    #                 "galaxyType"     : galaxy_buffer["typ" ],
-    #             } 
-    #         }) as af:
-    #             fn = os.path.join(outdir, f"galaxy_info_{i:03d}.asdf")
-    #             af.write_to(fn, all_array_compression = 'zlib')
-    #             logger.info(f"completed: {100*total_items_loaded/total_items:.2f}% - {i} files written...")
-    #             i += 1
-    #     logger.info(f"written {i} galaxy catalog files.")
+    # Writing a summary file:
+    with open(os.path.join(outdir, "summary.txt"), 'w') as fp: 
+        fp.write( "file_name, central_count, satellite_count, file_size_bytes \n" )
+        for line in file_summary: fp.write(line + '\n')
+        logger.info(f"written summary file: {fp.name!r}")
+
+    # Writing extra data products: matter power spectrum and halo mass - variance - halo 
+    # concentration table for later uses. These data are send back by the catalog generation
+    # program by re-writing the main pipe
+    with open(os.path.join(outdir, "powerspectrum.txt"), 'w') as fp:
+        np.savetxt(fp, cgargs.pktab, header = "log_wavenum, log_power")
+        logger.info(f"written matter power spectrum data to file: {fp.name!r}")
+
+    with open(os.path.join(outdir, "halodata.txt"), 'w') as fp:
+        np.savetxt(fp, cgargs.mrsc_table, header = "log_mass, log_radius, log_sigma, log_conc")
+        logger.info(f"written halo data to file: {fp.name!r}")
 
     return
 
-def _write_asdf_chunck(args: tuple[str, np.dtype, int, int, str, dict]) -> tuple[str, int, int]:
-    # Write a part of the data as ASDF file. This returns the name of the file
-    # written and the number of central and satellite galaxies as. 
+def _write_asdf_chunck(args: tuple[str, int, int, str, dict]) -> str:
+    # Write a part of the data as ASDF file. 
     
-    shared_galaxy_file, galaxydata_t, start, count, fn, meta = args
+    galaxy_file, start, count, fn, meta = args
 
     # Loading the galaxy data buffer as a memmap
-    mm = np.memmap(shared_galaxy_file, dtype = galaxydata_t, mode = 'r', offset = 0)
-    galaxy_buffer = np.array(mm[start:start+count]) 
+    mm = np.memmap(galaxy_file, dtype = galaxydata_t, mode = 'r', offset = 0)
+    galaxy_buffer = np.array( mm[start:start+count] ) 
 
     # Calculating galaxy counts:
     types, counts = np.unique(galaxy_buffer["typ"], return_counts = True)
@@ -507,26 +495,18 @@ def _write_asdf_chunck(args: tuple[str, np.dtype, int, int, str, dict]) -> tuple
     }) as af:
         af.write_to(fn, all_array_compression = 'zlib')
 
-    return fn, counts_dict[b'c'], counts_dict[b's']
+    # Prepare a summary of the current file: 
+    summary = ', '.join([ 
+        os.path.basename(fn)     , # basename of the current file 
+        str( counts_dict[b'c']  ), # central galaxies in this file 
+        str( counts_dict[b's']  ), # satellite galaxies in this file
+        str( os.path.getsize(fn)), # file size in bytes
+    ])   
+    return summary
 
-def _clean_up(id: int) -> None:
-    #  Clean up unwanted files, optionally keep halo catalog.
-
-    logger = logging.getLogger()
-
-    files_to_delete = [ f"{id}.meta.dat", f"{id}.vars.dat", f"{id}.gbuf.dat", f"{id}.hbuf.dat" ]
-    for file in files_to_delete:
-        if not os.path.exists(file): continue # file already deleted
-        try:
-            logger.info(f"deleting {file!r}...")
-            os.remove( file )
-            # Exceptions are ignored, with printing a log message for that.
-        except PermissionError:
-            logger.error(f"failed to delete file {file!r} - premission denied")
-        except Exception:
-            logger.exception(f"error deleting file {file!r}.")
-
-    return
+############################################################################################################
+#                                                MAIN
+############################################################################################################
 
 @click.version_option(__version__, message = "%(prog)s v%(version)s")
 @click.option("--simname"     , help="Name of simulation"             , required=True    , type=str                              )
@@ -554,12 +534,11 @@ def galaxy_catalog_generator(
         scale_shmf   : float =  0.5,
         slope_shmf   : float =  2. ,
         filter_fn    : Literal["tophat", "gauss"] = "tophat",
-        sigma_size   : int   = 101,
-        output_path  : str   = '.',
-        catalog_path : str   = '.',
-        nthreads     : int   = -1 ,
+        sigma_size   : int   = 101 ,
+        output_path  : str   = '.' ,
+        catalog_path : str   = '.' ,
+        nthreads     : int   = -1  ,
         rseed        : int   = None,
-        process_id   : int   = None,
     ) -> None:
     """
     Generate galaxy catalogs based on a halo catalog and halo model.\f 
@@ -620,24 +599,10 @@ def galaxy_catalog_generator(
 
     rseed : int, optional
         Random seed value. Must be an integer. (It can also be specifed by the 
-        environment variable `RSEED`)
-
-    process_id : int, optional
-        ID for data sharing. (It can also be specifed by the environment variable 
-        `FID`) 
+        environment variable `RSEED`) 
 
     Notes
     -----
-    This supports only for a specific set of simulations. For others use the functions
-    
-    1. `_share_data` to make the required data available as shared data to galaxy 
-      generator procedure, in the correct format.
-    2. `_generate_galaxies` to generate the galaxy catalog using this data.  
-    3. `_save_data_as_asdf` to convert the generated data to portable ASDF format.
-    4. `_clean_up` to clean-up unwanted files (optional).
-
-    in the specified order.
-
     To use this as a CLI tool, for supported simulations, use
 
     ```
@@ -645,55 +610,50 @@ def galaxy_catalog_generator(
     ```
 
     where the options are same as the parameters (with prefix `--` and `_` in names 
-    replaced by `-`), except `rseed` and `process_id`. Use environment variables to 
-    set them, if needed.  
+    replaced by `-`).  
 
     """
 
+    import shutil, tempfile
     from math import log
     
-    # Value of process_id is used for data sharing. If not specified, process ID
-    # of this process is used. Its value can also passed using the environment
-    # variable FID. It should be a positive integer. In case of incorrect value, 
-    # default is used. 
-    if not isinstance(process_id, int) or process_id < 0:
-        process_id = os.environ.get("FID", os.getpid())
-    try:
-        process_id = int( process_id )
-    except ValueError:
-        process_id = os.getpid()  
-
     # Random seed value can also be passed as an environment variable. It should
     # be a positive integer. Otherwise, a default value is generated based on the
     # current time. 
     if not isinstance(rseed, int):
         rseed = os.environ.get("RSEED", "None")
         rseed = int(rseed) if str.isnumeric(rseed) else None
-            
+
+    # Creating a temporary working directory: all the intermediate files like 
+    # halo and galaxy data buffers are created in this temp directory.
+    work_dir = tempfile.mkdtemp(prefix = f".gcg.{os.getpid()}.")
+
     # Setting up shared data based on simulation. Type of simulation is calculated
     # based on the prefix of its name.  
-    error_code = _prepare_workspace(
-        process_id, 
+    meta_and_args = prepare_workspace(
+        work_dir, 
         {
-            "lnm_min"   : log(mmin),
-            "sigma_m"   : sigma_m,
-            "lnm0"      : log(m0),
-            "lnm1"      : log(m1),
-            "alpha"     : alpha,
-            "scale_shmf": scale_shmf,
-            "slope_shmf": slope_shmf,
-            "sigma_size": sigma_size,
-            "filter"    : filter_fn,
+            "lnm_min"   : log(mmin) , "sigma_m"   : sigma_m   ,
+            "lnm0"      : log(m0)   , "lnm1"      : log(m1)   ,
+            "alpha"     : alpha     , "scale_shmf": scale_shmf,
+            "slope_shmf": slope_shmf, "sigma_size": sigma_size,
+            "filter"    : filter_fn ,
         }, 
         simname, 
         redshift, 
-        catalog_path,
+        catalog_path, 
+        rseed, 
+        nthreads,
     )
-    if error_code != 0: return # catalog generation failed :(
+    if not meta_and_args: return # catalog generation failed :(
+    meta, args = meta_and_args
     
-    _generate_galaxies(process_id, nthreads, rseed)       # Generating the galaxies
-    _save_data_as_asdf(process_id, nthreads, output_path) # Saving data
-    _clean_up(process_id) # Cleaning up working folder
+    # Generating the galaxy data and exporting to ASDF format
+    generate_galaxies(args)  
+    export_data_products(args, meta, output_path) 
+
+    # Cleaning up the working directory:
+    shutil.rmtree(work_dir, ignore_errors = True)
     return
 
 if __name__ == "__main__":
@@ -732,5 +692,6 @@ if __name__ == "__main__":
         }, 
         "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
     })
+
     galaxy_catalog_generator = click.command( galaxy_catalog_generator )
     galaxy_catalog_generator()
