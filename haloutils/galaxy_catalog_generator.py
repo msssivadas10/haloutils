@@ -1,17 +1,14 @@
 # Galaxy catalog generator app: Generates galaxy catalogs based on halo catalogs. 
 # Currently support only AbacusSummit simulation. 
-#
-# Usage  : python3 galaxy_catalog_generator.py [OPTIONS]
-# Options: See main setion at the end or use --help option.
 #   
 
-__version__ = "0.1a"
+__version__ = "0.2a"
 
 import numpy as np
 import numpy.ctypeslib as npct, ctypes as ct
-import os, os.path, glob, re, logging, asdf, time, click
-import threading, multiprocessing
+import os, re, logging, asdf, time, threading, multiprocessing
 from collections import namedtuple
+from pathlib import Path
 from typing import Literal
 
 # Container for halo model parameters:
@@ -58,7 +55,7 @@ cgargtypes = cgargs_t(
 ############################################################################################################
 
 def pack_arguments(
-        work_dir      : str,                 # path to the working directory
+        work_dir      : Path,                # path to the working directory
         hmargs        : tuple,               # halo model parameters      
         bounding_box  : np.ndarray,          # simulation bounding box   
         mass_range    : tuple[float, float], # mass range for variance table
@@ -72,6 +69,7 @@ def pack_arguments(
     # Pack the arguments for the galaxy generator function in the correct order and
     # type. Also, create the halo catalog buffer in the correct format. 
 
+    work_dir     = Path(work_dir)
     bounding_box = np.array(bounding_box, "f8"    ); assert bounding_box.shape == (2, 3)
     pktable      = np.array(pktable     , "f8"    ); assert pktable.shape[1]   == 2
     hmargs       = np.array(hmargs      , hmargs_t)
@@ -81,15 +79,16 @@ def pack_arguments(
     nthreads     = os.cpu_count()   if nthreads < 1 else int(nthreads)
     rseed        = int( time.time() if rseed is None else rseed )
 
-    def encode(string: str): 
+    def encode_full_path(fn):
+        string = str( work_dir.joinpath(fn) ).encode("utf-8") 
         assert len(string) <= 1024, f"string length exceeds maximum limit: {string}"
-        return string.encode("utf-8")
+        return string
 
     # Packing the arguments in correct order:
     args = cgargs_t(
-        halo_path     = encode(os.path.join(work_dir, f"hbuf.bin")), # Path to the halo catalog file (input) 
-        glxy_path     = encode(os.path.join(work_dir, f"gbuf.bin")), # Path to the galaxy catalog file (output)
-        logs_path     = encode(os.path.join(work_dir, f"log"     )), # Path to the log file
+        halo_path     = encode_full_path(f"hbuf.bin"), # Path to the halo catalog file (input) 
+        glxy_path     = encode_full_path(f"gbuf.bin"), # Path to the galaxy catalog file (output)
+        logs_path     = encode_full_path(f"log"     ), # Path to the log file
         hmargs        = hmargs, 
         bbox          = bounding_box, 
         pktab         = pktable, 
@@ -101,8 +100,8 @@ def pack_arguments(
         mrsc_table    = np.zeros((var_tabsize, 4), "f8"),
         seed          = rseed, 
         nthreads      = nthreads
-    ) 
-    
+    )
+
     # Save the halo catalog data a binary file for sharing. Passing the halo catalog 
     # data loder as a generator, so that only the needed the data is loaded, making
     # effiicient use of memory. 
@@ -119,11 +118,11 @@ def pack_arguments(
     return args
 
 def prepare_abacus_workspace(
-        work_dir : str,   # path to the working directory
+        work_dir : Path,  # path to the working directory
         args     : dict,  # Values for halo model and other parameters
         simname  : str,   # Name of the simulation
         redshift : float, # Redshift 
-        loc      : str,   # Path to look for halo catalog files
+        loc      : Path,  # Path to look for halo catalog files
         rseed    : int,   # seed value for random number generation
         nthreads : int,   # no. of threads to use
     ) -> tuple[dict, cgargs_t]:
@@ -259,23 +258,19 @@ def prepare_abacus_workspace(
         },
     } 
 
-    # Filter out only the files with names matchng the pattern and sorting based on 
-    # the integer index: 
-    files = { 
-        int( m.group(1) ): m.string 
-            for m in map( 
-                lambda fn: re.search(r"halo_info_(\d{3}).asdf", fn), # for files like `halo_info_123.asdf`
-                glob.glob( 
-                    os.path.join(
-                        os.path.abspath(os.path.expanduser(loc)), # full path to files location 
-                        simname, "halos", f"z{redshift:.3f}", "halo_info", 
-                        "halo_info_*.asdf", 
-                    ) 
-                )
-            ) 
-            if m 
-    }
-    files  = [ files[idx] for idx in sorted(files) ]
+    # Filter out only the files with names matching the pattern `halo_info_xyz.asdf`  
+    # and sorting based on the integer index xyz: 
+    files = [
+        m.string for m in sorted(
+            map(
+                lambda fn: re.search(r"halo_info_(\d{3}).asdf", str(fn)), 
+                Path(loc).expanduser().absolute() 
+                         .joinpath(simname, "halos", f"z{redshift:.3f}", "halo_info")
+                         .glob("halo_info_*.asdf")
+            ), 
+            key = lambda m: m.group(1) if m is not None else 1000,
+        ) if m
+    ]
     if not files: 
         logger.info(f"no files available for simulation {simname!r} at z={redshift}")
         return
@@ -308,11 +303,11 @@ def prepare_abacus_workspace(
     return meta, cgargs
 
 def prepare_workspace(
-        work_dir : str,   # path to the working directory 
+        work_dir : Path,  # path to the working directory 
         args     : dict,  # Values for halo model and other parameters
         simname  : str,   # Name of the simulation
         redshift : float, # Redshift 
-        loc      : str,   # Path to look for halo catalog files
+        loc      : Path,  # Path to look for halo catalog files
         rseed    : int,   # seed value for random number generation
         nthreads : int,   # no. of threads to use
     ) -> tuple[dict, cgargs_t]:
@@ -332,15 +327,15 @@ def generate_galaxies(args: cgargs_t) -> int:
     # on failure. 
     
     # Loading the shared library and setting up the functions
-    lib = npct.load_library("libhaloutils", os.path.dirname(__file__))
+    lib = npct.load_library("libhaloutils", Path(__file__).parent)
     lib.cgenerate_galaxy_catalog.argtypes = [*cgargtypes, ct.POINTER(ct.c_int)]
     lib.cgenerate_galaxy_catalog.restype  = None
 
-    assert os.path.exists( args.halo_path ), "missing shared halo catalog data"    
+    assert Path(str(args.halo_path, encoding = "utf-8")).exists(), "missing shared halo catalog data"    
 
     # Start a thread for logging
     stop_event = threading.Event()
-    logs_file  = args.logs_path
+    logs_file  = Path(str(args.logs_path, encoding = "utf-8"))
     thread     = threading.Thread(target = _log_watcher, args = (logs_file, stop_event), daemon = True)
     thread.start()
     
@@ -360,7 +355,7 @@ def generate_galaxies(args: cgargs_t) -> int:
 
     return 0
 
-def _log_watcher(logs_file: str, stop_event: threading.Event) -> None:
+def _log_watcher(logs_file: Path, stop_event: threading.Event) -> None:
     # Watch the log file, pass the lines to main log file as they appear.
 
     ONE_DAY      = 86400 # Seconds in a day
@@ -368,7 +363,7 @@ def _log_watcher(logs_file: str, stop_event: threading.Event) -> None:
     
     # Wait until the file is created, with timeout of one day 
     start_time = time.time()
-    while not os.path.exists(logs_file):
+    while not logs_file.exists():
         if stop_event.is_set(): return
         if time.time() - start_time > ONE_DAY: # set a wait timeout of 1 day
             import warnings
@@ -408,39 +403,40 @@ def _log_watcher(logs_file: str, stop_event: threading.Event) -> None:
 def export_data_products(
         cgargs : cgargs_t, # Contains output filename and extra data
         meta   : dict,     # Metadata to include in the ASDF files as header
-        path   : str ,     # Path to the output folder - files will be in galaxy_info subdir.
+        path   : Path,     # Path to the output folder - files will be in galaxy_info subdir.
     ) -> None:
     # Export data from the output buffer to ASDF file(s) in the given path. Also save
     # some additional data products such as matter power spectrum and variance tables, 
     # which are useful for later processing.  
 
     from math import ceil
+    from os.path import getsize
 
     GBUF_REC_SIZE = galaxydata_t.itemsize # Size of a galaxy buffer record
     FILE_MIN_SIZE = 1073741824            # Minimum size limit for an output data chunk (=1 GiB)
 
     logger = logging.getLogger()
 
-    galaxy_file = cgargs.glxy_path
-    assert os.path.exists(galaxy_file) and os.path.getsize(galaxy_file) % GBUF_REC_SIZE == 0  # file check
+    galaxy_file = Path(str(cgargs.glxy_path, encoding = "utf-8"))
+    assert galaxy_file.exists() and getsize(galaxy_file) % GBUF_REC_SIZE == 0  # file check
 
     # Folder for saving output ASDF files (create if not exist)
-    outdir = os.path.join( os.path.abspath(os.path.expanduser(path)), "galaxy_info" )
+    outdir = Path(path).expanduser().absolute().joinpath("galaxy_info" )
     os.makedirs(outdir, exist_ok = True)
-    logger.info(f"saving galaxy catalog files to {outdir!r}...")
+    logger.info(f"saving galaxy catalog files to {str(outdir)!r}...")
     
     # Loading galaxy data from the binary file and save them in ASDF files: 
     # Each file will store the metadata (header), and the data section contains 
     # position (Mpc), mass (Msun), parent halo ID and galaxy type (c for central, 
     # s for satellite).
-    total_items = os.path.getsize(galaxy_file) // GBUF_REC_SIZE # total numebr of records
-    chunk_size  = ceil(FILE_MIN_SIZE / GBUF_REC_SIZE)           # size of chunk of data (min: 1 GiB)
+    total_items = getsize(galaxy_file) // GBUF_REC_SIZE # total numebr of records
+    chunk_size  = ceil(FILE_MIN_SIZE / GBUF_REC_SIZE)   # size of chunk of data (min: 1 GiB)
 
     args, files_count, n_items = [], 0, 0
     while n_items < total_items:
         start = files_count * chunk_size             # start of the block
         count = min(chunk_size, total_items - start) # size of the block
-        fn    = os.path.join(outdir, f"galaxy_info_{files_count:03d}.asdf") # output file 
+        fn    = outdir.joinpath(f"galaxy_info_{files_count:03d}.asdf") # output file 
         args.append((galaxy_file, start, count, fn, meta))
         n_items     += count
         files_count += 1
@@ -452,7 +448,7 @@ def export_data_products(
     logger.info(f"written {files_count} galaxy catalog files.")
 
     # Writing a summary file:
-    with open(os.path.join(outdir, "summary.txt"), 'w') as fp: 
+    with open(outdir.joinpath("summary.txt"), 'w') as fp: 
         fp.write( "file_name, central_count, satellite_count, file_size_bytes \n" )
         for line in file_summary: fp.write(line + '\n')
         logger.info(f"written summary file: {fp.name!r}")
@@ -460,18 +456,20 @@ def export_data_products(
     # Writing extra data products: matter power spectrum and halo mass - variance - halo 
     # concentration table for later uses. These data are send back by the catalog generation
     # program by re-writing the main pipe
-    with open(os.path.join(outdir, "powerspectrum.txt"), 'w') as fp:
+    with open(outdir.joinpath("powerspectrum.txt"), 'w') as fp:
         np.savetxt(fp, cgargs.pktab, header = "log_wavenum, log_power")
         logger.info(f"written matter power spectrum data to file: {fp.name!r}")
 
-    with open(os.path.join(outdir, "halodata.txt"), 'w') as fp:
+    with open(outdir.joinpath("halodata.txt"), 'w') as fp:
         np.savetxt(fp, cgargs.mrsc_table, header = "log_mass, log_radius, log_sigma, log_conc")
         logger.info(f"written halo data to file: {fp.name!r}")
 
     return
 
-def _write_asdf_chunck(args: tuple[str, int, int, str, dict]) -> str:
+def _write_asdf_chunck(args: tuple[Path, int, int, Path, dict]) -> str:
     # Write a part of the data as ASDF file. 
+
+    from os.path import getsize
     
     galaxy_file, start, count, fn, meta = args
 
@@ -480,9 +478,9 @@ def _write_asdf_chunck(args: tuple[str, int, int, str, dict]) -> str:
     galaxy_buffer = np.array( mm[start:start+count] ) 
 
     # Calculating galaxy counts:
-    types, counts = np.unique(galaxy_buffer["typ"], return_counts = True)
-    counts_dict   = dict(zip(types, counts))
-    assert set(counts_dict) == { b'c', b's' }
+    gt, cnts = np.unique(galaxy_buffer["typ"], return_counts = True)
+    counts   = dict(zip(gt, cnts))
+    assert set(counts) == { b'c', b's' }
 
     with asdf.AsdfFile({
         "header" : meta, 
@@ -493,14 +491,14 @@ def _write_asdf_chunck(args: tuple[str, int, int, str, dict]) -> str:
             "galaxyType"     : galaxy_buffer["typ" ],
         } 
     }) as af:
-        af.write_to(fn, all_array_compression = 'zlib')
+        af.write_to(str(fn), all_array_compression = 'zlib')
 
     # Prepare a summary of the current file: 
     summary = ', '.join([ 
-        os.path.basename(fn)     , # basename of the current file 
-        str( counts_dict[b'c']  ), # central galaxies in this file 
-        str( counts_dict[b's']  ), # satellite galaxies in this file
-        str( os.path.getsize(fn)), # file size in bytes
+        fn.name,              # basename of the current file 
+        str( counts[b'c']  ), # central galaxies in this file 
+        str( counts[b's']  ), # satellite galaxies in this file
+        str( getsize(fn)),    # file size in bytes
     ])   
     return summary
 
@@ -508,21 +506,87 @@ def _write_asdf_chunck(args: tuple[str, int, int, str, dict]) -> str:
 #                                                MAIN
 ############################################################################################################
 
-@click.version_option(__version__, message = "%(prog)s v%(version)s")
-@click.option("--simname"     , help="Name of simulation"             , required=True    , type=str                              )
-@click.option("--redshift"    , help="Redshift value"                 , required=True    , type=float                            )
-@click.option("--mmin"        , help="Central galaxy threshold mass"  , required=True    , type=float                            )
-@click.option("--m0"          , help="Satellite galaxy threshold"     , required=True    , type=float                            )
-@click.option("--m1"          , help="Satellite count amplitude"      , required=True    , type=float                            )
-@click.option("--sigma-m"     , help="Central galaxy width parameter" ,  default=0.      , type=float                            )
-@click.option("--alpha"       , help="Satellite power-law count index",  default=1.      , type=float                            )
-@click.option("--scale-shmf"  , help="SHMF scale parameter"           ,  default=0.5     , type=float                            )
-@click.option("--slope-shmf"  , help="SHMF slope parameter"           ,  default=2.      , type=float                            )
-@click.option("--filter-fn"   , help="Filter function for variance"   ,  default="tophat", type=click.Choice(["tophat", "gauss"]))
-@click.option("--sigma-size"  , help="Size of variance table"         ,  default=101     , type=int                              )
-@click.option("--output-path" , help="Path to output files"           ,  default='.'     , type=click.Path(file_okay = False)    )
-@click.option("--catalog-path", help="Path to catalog files"          ,  default='.'     , type=click.Path(exists    = True )    )
-@click.option("--nthreads"    , help="Number of threads to use"       ,  default=-1      , type=int                              )
+def configure_default_logger(dir: str = None):
+
+    import logging.config
+    
+    # Path to log files:
+    dir = Path().cwd().joinpath("logs") if dir is None else Path(dir)     # path log folder
+    fn  = dir.joinpath(re.sub(r"(?<=\.)py$", "log", Path(__file__).name)) # full path to log files
+    os.makedirs(fn.parent, exist_ok = True)
+    
+    # Configure logging:
+    logging.config.dictConfig({
+        "version": 1, 
+        "disable_existing_loggers": True, 
+        "formatters": { 
+            "default": { "format": "[ %(asctime)s %(levelname)s %(process)d ] %(message)s" }
+        }, 
+        "handlers": {
+            "stream": {
+                "level"    : "INFO", 
+                "formatter": "default", 
+                "class"    : "logging.StreamHandler", 
+                "stream"   : "ext://sys.stdout"
+            }, 
+            "file": {
+                "level"      : "INFO", 
+                "formatter"  : "default", 
+                "class"      : "logging.handlers.RotatingFileHandler", 
+                "filename"   : fn, 
+                "mode"       : "a", 
+                "maxBytes"   : 10485760, # create a new file if size exceeds 10 MiB
+                "backupCount": 4         # use maximum 4 files
+            }
+        }, 
+        "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
+    })
+    return
+
+def __execute_as_command_on_main(cli):
+    # NOTE: For only use with `galaxy_catalog_generator`
+
+    if __name__ != "__main__": return cli
+
+    import click, inspect, warnings
+
+    # Adding options:
+    args  = inspect.signature(cli).parameters
+    empty = inspect._empty 
+    for name, opts, help_string, _type in reversed([
+        ("simname"     , [], "Name of simulation"             , str                              ),
+        ("redshift"    , [], "Redshift value"                 , float                            ),
+        ("mmin"        , [], "Central galaxy threshold mass"  , float                            ),
+        ("m0"          , [], "Satellite galaxy threshold"     , float                            ),
+        ("m1"          , [], "Satellite count amplitude"      , float                            ),
+        ("sigma_m"     , [], "Central galaxy width parameter" , float                            ),
+        ("alpha"       , [], "Satellite power law count index", float                            ),
+        ("scale_shmf"  , [], "SHMF scale parameter"           , float                            ),
+        ("slope_shmf"  , [], "SHMF slope parameter"           , float                            ),
+        ("filter_fn"   , [], "Filter function for variance"   , click.Choice(["tophat", "gauss"])),
+        ("sigma_size"  , [], "Size of variance table"         , int                              ),
+        ("output_path" , [], "Path to output files"           , click.Path(file_okay = False)    ),
+        ("catalog_path", [], "Path to catalog files"          , click.Path(exists    = True )    ),
+        ("nthreads"    , [], "Number of threads to use"       , int                              ),
+    ]):
+        parameter  = args[name]
+        add_option = click.option(
+            f"--{name}".replace('_', '-'), *opts, # options
+            help     =  help_string,                    
+            type     = _type,
+            default  =  parameter.default if parameter.default is not empty else None,
+            required =  parameter.default is empty,
+        )
+        cli = add_option(cli)
+    cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli)
+    cli = click.command(cli)
+
+    # Executing as command:
+    warnings.catch_warnings(action = "ignore")    
+    configure_default_logger()
+    return cli()
+
+@__execute_as_command_on_main
 def galaxy_catalog_generator(
         simname      : str,   
         redshift     : float,
@@ -535,8 +599,8 @@ def galaxy_catalog_generator(
         slope_shmf   : float =  2. ,
         filter_fn    : Literal["tophat", "gauss"] = "tophat",
         sigma_size   : int   = 101 ,
-        output_path  : str   = '.' ,
-        catalog_path : str   = '.' ,
+        output_path  : Path  = '.' ,
+        catalog_path : Path  = '.' ,
         nthreads     : int   = -1  ,
         rseed        : int   = None,
     ) -> None:
@@ -581,14 +645,19 @@ def galaxy_catalog_generator(
         Size of the variance table calculated from the power spectrum table.
 
     output_path : Path, optional
-        Path to save output files. Output ASDF files and metadata file can be 
+        Path to save output files. Output catalogs and other data products can be 
         found in the `galaxy_info` subdirectory. Use current directory as default. 
         Files saved will be 
 
         - `galaxy_info_{xyz}.asdf` - galaxy catalogs. `xyz` is a 3-digit index of
           the catalog starting from `000`. 
 
-        -  `metadata.asdf` - other parameters and values.
+        -  `summary.txt` - statistics of the saved catalogs.
+
+        - `powerspectrum.txt` - matter power spectrum table used in the process.
+
+        - `halodata.txt` - a table of halo mass, virial or lagrangian radius, 
+          variance and concentration.
 
     catalog_path : Path, optional
         Path to search halo catalogs (directory structure is simulation specific). 
@@ -598,19 +667,7 @@ def galaxy_catalog_generator(
         Number of threads, default is to use the number returned by `os.cpu_count`. 
 
     rseed : int, optional
-        Random seed value. Must be an integer. (It can also be specifed by the 
-        environment variable `RSEED`) 
-
-    Notes
-    -----
-    To use this as a CLI tool, for supported simulations, use
-
-    ```
-    python -m haloutils.galaxy_catalog_generator OPTION1=VALUE1 ...
-    ```
-
-    where the options are same as the parameters (with prefix `--` and `_` in names 
-    replaced by `-`).  
+        Random seed value. Must be an integer.
 
     """
 
@@ -624,9 +681,13 @@ def galaxy_catalog_generator(
         rseed = os.environ.get("RSEED", "None")
         rseed = int(rseed) if str.isnumeric(rseed) else None
 
+    catalog_path, output_path = Path(catalog_path), Path(output_path)
+    if not catalog_path.exists(): raise FileNotFoundError(f"path does not exist: {catalog_path}")
+    if not output_path.exists() : output_path.mkdir(parents = True)
+
     # Creating a temporary working directory: all the intermediate files like 
     # halo and galaxy data buffers are created in this temp directory.
-    work_dir = tempfile.mkdtemp(prefix = f".gcg.{os.getpid()}.")
+    work_dir = Path( tempfile.mkdtemp(prefix = f".gcg.{os.getpid()}.") )
 
     # Setting up shared data based on simulation. Type of simulation is calculated
     # based on the prefix of its name.  
@@ -656,42 +717,10 @@ def galaxy_catalog_generator(
     shutil.rmtree(work_dir, ignore_errors = True)
     return
 
-if __name__ == "__main__":
-
-    import logging.config, warnings
-    warnings.catch_warnings(action = "ignore")
-    
-    def get_log_filename(): 
-        p  = os.path.join( os.getcwd(), "logs" )
-        os.makedirs(p, exist_ok = True)
-        return os.path.join( p, re.sub(r"(?<=\.)py$", "log", os.path.basename(__file__)) )
-    
-    # Configure logging
-    logging.config.dictConfig({
-        "version": 1, 
-        "disable_existing_loggers": True, 
-        "formatters": { 
-            "default": { "format": "[ %(asctime)s %(levelname)s %(process)d ] %(message)s" }
-        }, 
-        "handlers": {
-            "stream": {
-                "level"    : "INFO", 
-                "formatter": "default", 
-                "class"    : "logging.StreamHandler", 
-                "stream"   : "ext://sys.stdout"
-            }, 
-            "file": {
-                "level"      : "INFO", 
-                "formatter"  : "default", 
-                "class"      : "logging.handlers.RotatingFileHandler", 
-                "filename"   : get_log_filename(), 
-                "mode"       : "a", 
-                "maxBytes"   : 10485760, # create a new file if size exceeds 10 MiB
-                "backupCount": 4         # use maximum 4 files
-            }
-        }, 
-        "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
-    })
-
-    galaxy_catalog_generator = click.command( galaxy_catalog_generator )
-    galaxy_catalog_generator()
+def __test():
+    logging.basicConfig(level=logging.INFO)
+    galaxy_catalog_generator(
+        "AbacusSummit_hugebase_c000_ph000", 3., 1e+12, 1e+12, 
+        1e+13, output_path="_data/", catalog_path="_data/abacus/"
+    )
+    return
