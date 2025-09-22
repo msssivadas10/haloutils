@@ -543,14 +543,13 @@ def configure_default_logger(dir: str = None):
     })
     return
 
-def __execute_as_command_on_main(cli):
-    # NOTE: For only use with `galaxy_catalog_generator`
+def __decorate_with_options(cli):
+    # Adding options to the function. NOTE: For only use with `galaxy_catalog_generator`
 
     if __name__ != "__main__": return cli
 
-    import click, inspect, warnings
+    import click, inspect
 
-    # Adding options:
     args  = inspect.signature(cli).parameters
     empty = inspect._empty 
     for name, opts, help_string, _type in reversed([
@@ -579,14 +578,9 @@ def __execute_as_command_on_main(cli):
         )
         cli = add_option(cli)
     cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli)
-    cli = click.command(cli)
+    return cli 
 
-    # Executing as command:
-    warnings.catch_warnings(action = "ignore")    
-    configure_default_logger()
-    return cli()
-
-@__execute_as_command_on_main
+@__decorate_with_options
 def galaxy_catalog_generator(
         simname      : str,   
         redshift     : float,
@@ -717,10 +711,17 @@ def galaxy_catalog_generator(
     shutil.rmtree(work_dir, ignore_errors = True)
     return
 
-def __test():
-    logging.basicConfig(level=logging.INFO)
-    galaxy_catalog_generator(
-        "AbacusSummit_hugebase_c000_ph000", 3., 1e+12, 1e+12, 
-        1e+13, output_path="_data/", catalog_path="_data/abacus/"
-    )
-    return
+
+if __name__ == "__main__": 
+
+    import click, warnings
+    warnings.catch_warnings(action = "ignore")    
+    
+    configure_default_logger() # configuring logger
+    click.command(galaxy_catalog_generator)() # executing as command
+    
+    # NOTE: for testing: will be removed later...
+    # galaxy_catalog_generator(
+    #     "AbacusSummit_hugebase_c000_ph000", 3., 1e+12, 1e+12, 
+    #     1e+13, output_path="_data/", catalog_path="_data/abacus/"
+    # )
