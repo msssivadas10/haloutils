@@ -14,7 +14,7 @@ boxinfo_t = [("boxsize", "f8", 3), ("origin", "f8", 3), ("gridsize", "i8", 3), (
 cinfo_t   = [("start", "i8"), ("count", "i8")]
 
 # Loading the shared library and setting up the functions
-lib = load_library("libhaloutils", os.path.dirname(__file__))
+lib = load_library("libhaloutils", os.path.dirname(os.path.dirname(__file__)))
 lib.build_grid_hash.argtypes = [
     c_int64  ,  c_int64      , _p(c_double, 2), _p(boxinfo_t),      
     c_int64  , _p(cinfo_t, 1), _p(c_int64 , 1),  c_int, 
