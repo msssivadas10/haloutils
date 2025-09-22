@@ -17,7 +17,8 @@
 #   BINS=$(echo $BINS | tr '\n' ' ' | grep -oP '(?<=\[)[^]]*(?=\])')        # get values between []
 #  
 
-import os, os.path, glob, re, logging, multiprocessing, numpy as np
+import os, re, logging, multiprocessing, numpy as np
+from pathlib import Path
 from itertools import repeat
 from functools import reduce  
 
@@ -83,14 +84,10 @@ def abacus_massfunction(
     files = [ 
         m.string 
             for m in map( 
-                lambda fn: re.search(r"halo_info_(\d{3}).asdf", fn), # for files like `halo_info_123.asdf`
-                glob.glob( 
-                    os.path.join(
-                        os.path.abspath(os.path.expanduser(loc)), # full path to files location 
-                        simname, "halos", f"z{redshift:.3f}", "halo_info", 
-                        "halo_info_*.asdf", 
-                    ) 
-                )
+                lambda fn: re.search(r"halo_info_(\d{3}).asdf", str(fn)), # for files like `halo_info_123.asdf`
+                Path(loc).expanduser().absolute()                         # full path to files location
+                         .joinpath(simname, "halos", f"z{redshift:.3f}", "halo_info")
+                         .glob("halo_info_*.asdf")
             ) 
             if m 
     ]
@@ -148,7 +145,7 @@ def abacus_massfunction(
 
     # Saving the data as a plain text file (optional: only if path specified)
     if outfile:
-        logger.info(f"saving data to file: {outfile!r}")
+        logger.info(f"saving data to file: {str(outfile)!r}")
         np.savetxt( 
             outfile, 
             np.log([ centers, dndlnm ]).T, 
