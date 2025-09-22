@@ -67,6 +67,7 @@ __pycache__
 *.dat
 *.tmp
 _data/
+_work/
 
 # Log files
 *.log
