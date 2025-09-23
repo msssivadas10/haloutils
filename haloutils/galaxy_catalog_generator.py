@@ -168,6 +168,7 @@ def prepare_abacus_workspace(
         return
     except Exception:
         logger.exception(f"error getting metadata for simulation {simname!r} at z={redshift}")
+        return
     
     logger.info(f"using power spectrum and growth factor available with the metadata...") 
     
