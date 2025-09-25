@@ -507,81 +507,6 @@ def _write_asdf_chunck(args: tuple[Path, int, int, Path, dict]) -> str:
 #                                                MAIN
 ############################################################################################################
 
-def configure_default_logger(dir: str = None):
-
-    import logging.config
-    
-    # Path to log files:
-    dir = Path().cwd().joinpath("logs") if dir is None else Path(dir)     # path log folder
-    fn  = dir.joinpath(re.sub(r"(?<=\.)py$", "log", Path(__file__).name)) # full path to log files
-    os.makedirs(fn.parent, exist_ok = True)
-    
-    # Configure logging:
-    logging.config.dictConfig({
-        "version": 1, 
-        "disable_existing_loggers": True, 
-        "formatters": { 
-            "default": { "format": "[ %(asctime)s %(levelname)s %(process)d ] %(message)s" }
-        }, 
-        "handlers": {
-            "stream": {
-                "level"    : "INFO", 
-                "formatter": "default", 
-                "class"    : "logging.StreamHandler", 
-                "stream"   : "ext://sys.stdout"
-            }, 
-            "file": {
-                "level"      : "INFO", 
-                "formatter"  : "default", 
-                "class"      : "logging.handlers.RotatingFileHandler", 
-                "filename"   : fn, 
-                "mode"       : "a", 
-                "maxBytes"   : 10485760, # create a new file if size exceeds 10 MiB
-                "backupCount": 4         # use maximum 4 files
-            }
-        }, 
-        "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
-    })
-    return
-
-def __decorate_with_options(cli):
-    # Adding options to the function. NOTE: For only use with `galaxy_catalog_generator`
-
-    if __name__ != "__main__": return cli
-
-    import click, inspect
-
-    args  = inspect.signature(cli).parameters
-    empty = inspect._empty 
-    for name, opts, help_string, _type in reversed([
-        ("simname"     , [], "Name of simulation"             , str                              ),
-        ("redshift"    , [], "Redshift value"                 , float                            ),
-        ("mmin"        , [], "Central galaxy threshold mass"  , float                            ),
-        ("m0"          , [], "Satellite galaxy threshold"     , float                            ),
-        ("m1"          , [], "Satellite count amplitude"      , float                            ),
-        ("sigma_m"     , [], "Central galaxy width parameter" , float                            ),
-        ("alpha"       , [], "Satellite power law count index", float                            ),
-        ("scale_shmf"  , [], "SHMF scale parameter"           , float                            ),
-        ("slope_shmf"  , [], "SHMF slope parameter"           , float                            ),
-        ("filter_fn"   , [], "Filter function for variance"   , click.Choice(["tophat", "gauss"])),
-        ("sigma_size"  , [], "Size of variance table"         , int                              ),
-        ("output_path" , [], "Path to output files"           , click.Path(file_okay = False)    ),
-        ("catalog_path", [], "Path to catalog files"          , click.Path(exists    = True )    ),
-        ("nthreads"    , [], "Number of threads to use"       , int                              ),
-    ]):
-        parameter  = args[name]
-        add_option = click.option(
-            f"--{name}".replace('_', '-'), *opts, # options
-            help     =  help_string,                    
-            type     = _type,
-            default  =  parameter.default if parameter.default is not empty else None,
-            required =  parameter.default is empty,
-        )
-        cli = add_option(cli)
-    cli = click.version_option(__version__, message = "%(prog)s v%(version)s")(cli)
-    return cli 
-
-@__decorate_with_options
 def galaxy_catalog_generator(
         simname      : str,   
         redshift     : float,
@@ -712,14 +637,104 @@ def galaxy_catalog_generator(
     shutil.rmtree(work_dir, ignore_errors = True)
     return
 
+def configure_default_logger(dir: str = None):
+
+    import logging.config
+    
+    # Path to log files:
+    dir = Path().cwd().joinpath("logs") if dir is None else Path(dir)     # path log folder
+    fn  = dir.joinpath(re.sub(r"(?<=\.)py$", "log", Path(__file__).name)) # full path to log files
+    os.makedirs(fn.parent, exist_ok = True)
+    
+    # Configure logging:
+    logging.config.dictConfig({
+        "version": 1, 
+        "disable_existing_loggers": True, 
+        "formatters": { 
+            "default": { "format": "[ %(asctime)s %(levelname)s %(process)d ] %(message)s" }
+        }, 
+        "handlers": {
+            "stream": {
+                "level"    : "INFO", 
+                "formatter": "default", 
+                "class"    : "logging.StreamHandler", 
+                "stream"   : "ext://sys.stdout"
+            }, 
+            "file": {
+                "level"      : "INFO", 
+                "formatter"  : "default", 
+                "class"      : "logging.handlers.RotatingFileHandler", 
+                "filename"   : fn, 
+                "mode"       : "a", 
+                "maxBytes"   : 10485760, # create a new file if size exceeds 10 MiB
+                "backupCount": 4         # use maximum 4 files
+            }
+        }, 
+        "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
+    })
+    return
 
 if __name__ == "__main__": 
 
-    import click, warnings
+    import warnings, inspect, click
     warnings.catch_warnings(action = "ignore")    
+
+    def with_options(fn, /, **option_spec: tuple[list[str], str]):
+
+        from typing import get_origin, get_args
+
+        params  = inspect.signature(fn).parameters
+        options = [] 
+        for key in params:
+            if key not in option_spec: continue
+            opts, help = option_spec[key]
+            p          = params[key]
+            decls      = [ f"--{key}".replace('_', '-'), *opts ] 
+            attrs      = {}
+            optype     = p.annotation
+            if get_origin(optype) is Literal:
+                optype = click.Choice( get_args(optype) )
+            elif get_origin(optype) is list:
+                optype, = get_args(optype)
+                attrs.update( multiple = True, envvar = p.name.upper() )
+            elif get_origin(optype) is tuple:
+                optype = get_args(optype)
+            elif optype is Path:
+                if   p.name in [ "output_path" ] : optype = click.Path(file_okay = False)
+                elif p.name in [ "catalog_path" ]: optype = click.Path(exists    = True )
+                else:
+                    optype = click.Path()
+            attrs.update( type = optype )
+            if p.default is not p.empty: 
+                attrs.update( default = p.default, required = False )
+            else:
+                attrs.update( required = True )
+            options.append( click.option(*decls, **attrs, help = help) )
+        for option_decorator in reversed(options): 
+            fn = option_decorator(fn)
+        return fn
     
     configure_default_logger() # configuring logger
-    click.command(galaxy_catalog_generator)() # executing as command
+    cli = click.command(
+        with_options(
+            galaxy_catalog_generator, 
+            simname      = (["-s" ], "Name of simulation"             ),
+            redshift     = (["-z" ], "Redshift value"                 ),
+            mmin         = (["-mm"], "Central galaxy threshold mass"  ),
+            m0           = (["-m0"], "Satellite galaxy threshold"     ),
+            m1           = (["-m1"], "Satellite count amplitude"      ),
+            sigma_m      = (["-w" ], "Central galaxy width parameter" ),
+            alpha        = (["-a" ], "Satellite power law count index"),
+            scale_shmf   = (["-b" ], "SHMF scale parameter"           ),
+            slope_shmf   = (["-j" ], "SHMF slope parameter"           ),
+            filter_fn    = (["-f" ], "Filter function for variance"   ),
+            sigma_size   = (["-k" ], "Size of variance table"         ),
+            output_path  = (["-o" ], "Path to output files"           ),
+            catalog_path = (["-l" ], "Path to catalog files"          ),
+            nthreads     = (["-n" ], "Number of threads to use"       ),
+        )
+    )
+    cli() # executing as command
     
     # NOTE: for testing: will be removed later...
     # galaxy_catalog_generator(
