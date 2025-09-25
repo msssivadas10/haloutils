@@ -2,7 +2,7 @@
 # Currently support only AbacusSummit simulation. 
 #   
 
-__version__ = "0.2a"
+__version__ = "0.5a"
 
 import numpy as np
 import numpy.ctypeslib as npct, ctypes as ct
