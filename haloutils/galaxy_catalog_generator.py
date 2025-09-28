@@ -637,104 +637,34 @@ def galaxy_catalog_generator(
     shutil.rmtree(work_dir, ignore_errors = True)
     return
 
-def configure_default_logger(dir: str = None):
-
-    import logging.config
-    
-    # Path to log files:
-    dir = Path().cwd().joinpath("logs") if dir is None else Path(dir)     # path log folder
-    fn  = dir.joinpath(re.sub(r"(?<=\.)py$", "log", Path(__file__).name)) # full path to log files
-    os.makedirs(fn.parent, exist_ok = True)
-    
-    # Configure logging:
-    logging.config.dictConfig({
-        "version": 1, 
-        "disable_existing_loggers": True, 
-        "formatters": { 
-            "default": { "format": "[ %(asctime)s %(levelname)s %(process)d ] %(message)s" }
-        }, 
-        "handlers": {
-            "stream": {
-                "level"    : "INFO", 
-                "formatter": "default", 
-                "class"    : "logging.StreamHandler", 
-                "stream"   : "ext://sys.stdout"
-            }, 
-            "file": {
-                "level"      : "INFO", 
-                "formatter"  : "default", 
-                "class"      : "logging.handlers.RotatingFileHandler", 
-                "filename"   : fn, 
-                "mode"       : "a", 
-                "maxBytes"   : 10485760, # create a new file if size exceeds 10 MiB
-                "backupCount": 4         # use maximum 4 files
-            }
-        }, 
-        "loggers": { "root": { "level": "INFO", "handlers": [ "stream", "file" ] } }
-    })
-    return
-
 if __name__ == "__main__": 
-
-    import warnings, inspect, click
-    warnings.catch_warnings(action = "ignore")    
-
-    def with_options(fn, /, **option_spec: tuple[list[str], str]):
-
-        from typing import get_origin, get_args
-
-        params  = inspect.signature(fn).parameters
-        options = [] 
-        for key in params:
-            if key not in option_spec: continue
-            opts, help = option_spec[key]
-            p          = params[key]
-            decls      = [ f"--{key}".replace('_', '-'), *opts ] 
-            attrs      = {}
-            optype     = p.annotation
-            if get_origin(optype) is Literal:
-                optype = click.Choice( get_args(optype) )
-            elif get_origin(optype) is list:
-                optype, = get_args(optype)
-                attrs.update( multiple = True, envvar = p.name.upper() )
-            elif get_origin(optype) is tuple:
-                optype = get_args(optype)
-            elif optype is Path:
-                if   p.name in [ "output_path" ] : optype = click.Path(file_okay = False)
-                elif p.name in [ "catalog_path" ]: optype = click.Path(exists    = True )
-                else:
-                    optype = click.Path()
-            attrs.update( type = optype )
-            if p.default is not p.empty: 
-                attrs.update( default = p.default, required = False )
-            else:
-                attrs.update( required = True )
-            options.append( click.option(*decls, **attrs, help = help) )
-        for option_decorator in reversed(options): 
-            fn = option_decorator(fn)
-        return fn
-    
-    configure_default_logger() # configuring logger
-    cli = click.command(
-        with_options(
-            galaxy_catalog_generator, 
-            simname      = (["-s" ], "Name of simulation"             ),
-            redshift     = (["-z" ], "Redshift value"                 ),
-            mmin         = (["-mm"], "Central galaxy threshold mass"  ),
-            m0           = (["-m0"], "Satellite galaxy threshold"     ),
-            m1           = (["-m1"], "Satellite count amplitude"      ),
-            sigma_m      = (["-w" ], "Central galaxy width parameter" ),
-            alpha        = (["-a" ], "Satellite power law count index"),
-            scale_shmf   = (["-b" ], "SHMF scale parameter"           ),
-            slope_shmf   = (["-j" ], "SHMF slope parameter"           ),
-            filter_fn    = (["-f" ], "Filter function for variance"   ),
-            sigma_size   = (["-k" ], "Size of variance table"         ),
-            output_path  = (["-o" ], "Path to output files"           ),
-            catalog_path = (["-l" ], "Path to catalog files"          ),
-            nthreads     = (["-n" ], "Number of threads to use"       ),
-        )
-    )
-    cli() # executing as command
+    import importlib.util
+    path = Path(__file__).parent.joinpath("misc", "clitools.py")
+    spec = importlib.util.spec_from_file_location( "misc.clitools", str(path) )
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod) 
+    mod.build_cli(
+        (galaxy_catalog_generator, dict(
+                simname      = (["-s" ], "Name of simulation"             ,                ),
+                redshift     = (["-z" ], "Redshift value"                 ,                ),
+                mmin         = (["-mm"], "Central galaxy threshold mass"  ,                ),
+                m0           = (["-m0"], "Satellite galaxy threshold"     ,                ),
+                m1           = (["-m1"], "Satellite count amplitude"      ,                ),
+                sigma_m      = (["-w" ], "Central galaxy width parameter" ,                ),
+                alpha        = (["-a" ], "Satellite power law count index",                ),
+                scale_shmf   = (["-b" ], "SHMF scale parameter"           ,                ),
+                slope_shmf   = (["-j" ], "SHMF slope parameter"           ,                ),
+                filter_fn    = (["-f" ], "Filter function for variance"   ,                ),
+                sigma_size   = (["-k" ], "Size of variance table"         ,                ),
+                output_path  = (["-o" ], "Path to output files"           , 'DIR'          ),
+                catalog_path = (["-l" ], "Path to catalog files"          , 'DIR', 'EXISTS'),
+                nthreads     = (["-n" ], "Number of threads to use"       ,                ),
+            )
+        ),
+        version = __version__,   
+        logfn   = Path(__file__).name.rsplit(os.extsep, maxsplit = 1)[0], 
+        ignore_warnings = True,
+    )() # executing as command
     
     # NOTE: for testing: will be removed later...
     # galaxy_catalog_generator(

@@ -162,41 +162,24 @@ def abacus_massfunction(
     return (dndlnm, centers)
 
 if __name__ == "__main__":
-
-    import click, inspect
-
-    # Add option decorators for `abacus_massfunction`:
-    params_mapping = inspect.signature( abacus_massfunction ).parameters
-    for options, help_string, _type, is_optional, is_multiple in reversed([
-        ( ["--simname" ], "Name of the abacus simulation", str                    , 0, 0 ),
-        ( ["--redshift"], "Redshift of simulation"       , float                  , 0, 0 ),
-        ( ["--bins"    ], "Mass bin edges in Msun"       , float                  , 0, 1 ),
-        ( ["--outfile" ], "Path for the output file"     , str                    , 0, 0 ),
-        ( ["--loc"     ], "Path to search halo catalogs" , click.Path(exists=True), 1, 0 ),
-        ( ["--nprocs"  ], "Number of threads"            , int                    , 1, 0 ),
-        ( ["--smooth"  ], "Size of the smoothing window" , int                    , 1, 0 ),
-    ]):
-        attrs   = { "required": True, "multiple": bool(is_multiple) }
-        default = params_mapping.get( options[0].removeprefix('--').replace('-', '_') ).default
-        if is_optional and default is not inspect._empty: 
-            attrs["required"], attrs["default"] = False, default
-        if is_multiple: 
-            attrs["envvar"] = options[0].removeprefix('--').upper()
-        decorator           = click.option(*options, type = _type, help = help_string, **attrs)
-        abacus_massfunction = decorator(abacus_massfunction)
-
-    ########################################################################################################
-
-    @click.group
-    @click.version_option(__version__, message = "%(prog)s v%(version)s")
-    def cli(): 
-        """
-        Calculate halo mass-function from halo catalogs.
-        """
-        logging.basicConfig(
-            level  = logging.INFO, 
-            format = "[ %(asctime)s %(levelname)s %(process)d ] %(message)s", 
-        ) # basic logging set-up
-
-    abacus_massfunction = cli.command(abacus_massfunction)
-    cli()
+    import importlib.util
+    path = Path(__file__).parent.joinpath("misc", "clitools.py")
+    spec = importlib.util.spec_from_file_location( "misc.clitools", str(path) )
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod) 
+    mod.build_cli(
+        (abacus_massfunction, dict(
+            simname  = ( ["-s"], "Name of the abacus simulation",         ),
+            redshift = ( ["-z"], "Redshift of simulation"       ,         ),
+            bins     = ( ["-b"], "Mass bin edges in Msun"       ,         ),
+            outfile  = ( ["-o"], "Path for the output file"     ,         ),
+            loc      = ( ["-l"], "Path to search halo catalogs" , 'EXISTS'),
+            nprocs   = ( ["-n"], "Number of threads"            ,         ),
+            smooth   = ( ["-f"], "Size of the smoothing window" ,         ),
+        )), 
+        help    = "Calculate halo mass-function from halo catalogs.",
+        version = __version__,   
+        logfn   = Path(__file__).name.rsplit(os.extsep, maxsplit = 1)[0], 
+        group   = True,
+        ignore_warnings = True,
+    )() # executing as command
