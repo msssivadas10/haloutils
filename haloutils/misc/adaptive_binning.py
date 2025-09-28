@@ -30,19 +30,20 @@ def adaptive_bins(
         Array of bin edges (length n_bins+1).
     """
 
-    x = np.asarray(x)
+    shift = min(x)
+    x = np.asarray(x) - shift
     f = np.asarray(f)
 
     # cumulative integral of f
-    dx = np.diff(x)
-    mid_f = 0.5*(f[1:] + f[:-1])
-    cum = np.concatenate(([0.0], np.cumsum(mid_f*dx)))
-    total = cum[-1]
+    dx    = np.diff(x)
+    mid_f = 0.5*(f[1:] + f[:-1]) - min(f)
+    cum   = np.concatenate(([0.0], np.cumsum(mid_f*dx)))
+    cum   = cum / cum[-1]
 
     # set target area if not given
     if target_area is None:
         approx_bins = (x[-1]-x[0]) / min_dx
-        target_area = total / approx_bins
+        target_area = 1. / approx_bins
 
     bin_edges = [x[0]]
     current_target = target_area
@@ -63,7 +64,7 @@ def adaptive_bins(
     if bin_edges[-1] < x[-1]:
         bin_edges.append(x[-1])
 
-    return np.array(bin_edges)
+    return np.array(bin_edges) + shift
 
 
 # Example usage
