@@ -169,4 +169,107 @@ def pair_count(
 
     return
 
-# _get_subbox_pairs(100., 10., 4, True)
+
+from Corrfunc.theory.DD import DD
+
+def count1(data, boxsize, rbins, subdivs, periodic, nthreads):
+    c1 = DD(
+        X1 = data[:,0], Y1 = data[:,1], Z1 = data[:,2], 
+        X2 = data[:,0], Y2 = data[:,1], Z2 = data[:,2], 
+        autocorr = 0, 
+        nthreads = nthreads, 
+        binfile  = rbins, 
+        periodic = periodic, 
+        boxsize  = boxsize, 
+        verbose  = False,
+    )["npairs"]
+
+    box = np.floor((data + boxsize / 2) / (boxsize / subdivs)).astype("i8")
+    box = np.clip(box, 0, subdivs-1) # set points outside to sub-regions at edges 
+    box = box[:,0]*subdivs**2 + box[:,1]*subdivs + box[:,2] # flattening index
+
+    c2 = []
+    for i in range(subdivs**3):
+        data2 = np.array(data[ box != i ])
+        c2_ = DD(
+            X1 = data2[:,0], Y1 = data2[:,1], Z1 = data2[:,2], 
+            X2 = data2[:,0], Y2 = data2[:,1], Z2 = data2[:,2], 
+            autocorr = 0, 
+            nthreads = nthreads, 
+            binfile  = rbins, 
+            periodic = periodic, 
+            boxsize  = boxsize, 
+            verbose  = False,
+        )["npairs"]
+        c2.append(c2_)
+    c2 = np.array(c2)
+
+    return c1, c2
+
+def count2(data, boxsize, rbins, subdivs, periodic, nthreads):
+    from math import ceil
+    from itertools import product
+
+    subboxsize = boxsize / subdivs
+    near_boxes = ceil(max(rbins) / subboxsize) # no. of boxes near to this box on each face
+    box_pairs  = []
+    for ix, iy, iz in product( range(subdivs), repeat = 3 ):
+        i = ix*subdivs**2 + iy*subdivs + iz # flat index
+        for dx, dy, dz in product( range(-near_boxes, near_boxes+1), repeat = 3 ):
+            jx, jy, jz = ix + dx, iy + dy, iz + dz
+            if periodic: # apply periodic wrapping
+                jx, jy, jz = jx % subdivs, jy % subdivs, jz % subdivs
+            elif any( q < 0 or q >= subdivs for q in (jx, jy, jz) ): # cell outside total box
+                continue
+            j = jx*subdivs**2 + jy*subdivs + jz # flat index
+            box_pairs.append((i, j))
+
+    box = np.floor((data + boxsize / 2) / (boxsize / subdivs)).astype("i8")
+    box = np.clip(box, 0, subdivs-1) # set points outside to sub-regions at edges 
+    box = box[:,0]*subdivs**2 + box[:,1]*subdivs + box[:,2] # flattening index
+
+    box_data = []
+    for i in range(subdivs**3):
+        data2 = np.array(data[ box == i ])
+        box_data.append(data2)
+
+    counts = {}
+    for i, j in box_pairs:
+        if j < i: continue
+        data1, data2 = box_data[i], box_data[j]
+        counts[(i,j)] = DD(
+            X1 = data1[:,0], Y1 = data1[:,1], Z1 = data1[:,2], 
+            X2 = data2[:,0], Y2 = data2[:,1], Z2 = data2[:,2], 
+            autocorr = (i==j), 
+            nthreads = nthreads, 
+            binfile  = rbins, 
+            periodic = periodic, 
+            boxsize  = boxsize, 
+            verbose  = False,
+        )["npairs"]
+
+    c1 = sum([ ( arr if i==j else 2*arr ) for (i, j), arr in counts.items() ])
+    c2 = np.array([
+        c1 - counts[(k, k)]
+        - 2*sum([ arr for (i, j), arr in counts.items() if i != j and (i == k or j == k) ])
+        for k in range(subdivs**3)
+    ])
+
+    return c1, c2
+
+subdivs = 4
+rbins = np.array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5])
+periodic = True
+nthreads = 4
+boxsize = 100
+rng  = np.random.default_rng(123456)
+data = rng.uniform(-boxsize / 2, boxsize / 2, (10000, 3))
+
+c1, c2 = count1(data, boxsize, rbins, subdivs, periodic, nthreads)
+d1, d2 = count2(data, boxsize, rbins, subdivs, periodic, nthreads)
+
+# print(c1)
+# print(d1)
+
+print(c2[2])
+print(d2[2])
