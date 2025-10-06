@@ -194,11 +194,25 @@ def pair_count_3d(
 def correlation_from_count(pc: pcresult, estimator: str = 'ls') -> Any:
     # Calculate the correlation function from given 3D pair counts.  
 
+    def _float(x): 
+        try: 
+            return float(x)
+        except TypeError: 
+            return np.asarray(x, dtype = float)
+        
+    def normalize_count(cnt, n1, n2):
+        n1n2 = _float(n1) * _float(n2)
+        try:
+            return np.true_divide( cnt, n1n2 )
+        except ValueError:
+            return np.true_divide( cnt, np.reshape(n1n2, (-1, 1)) )
+
     pairs = { # normalized pair counts
-        k: np.true_divide( 
-                getattr(pc, s1+s2), 
-                float( getattr(pc, 'N'+s1)*getattr(pc, 'N'+s2) ) 
-            )
+        k: normalize_count( 
+                getattr(pc,  s1+s2), 
+                getattr(pc, 'N'+s1), 
+                getattr(pc, 'N'+s2),
+            ) 
             for s1, s2, k in [ ("D1","D2","DD"), ("R1","R2","RR"), ("D1","R2","DR"), ("D2","R1","RD") ]
             if getattr(pc, s1+s2) is not None
     } 
@@ -337,7 +351,9 @@ def _corrfunc(
     if not fn1.exists() or not fn2.exists(): 
         files = list( Path(loc).glob( file_pattern ) )
         if not files: return _CORRFUNC_MISSING_CATALOGS
-
+    else: 
+        files = []
+    
     # Loading the data as memory maps:    
     logger.info("getting data for mass range {0[0]:.3e}..{0[1]:.3e}...".format(mrange1 or (0., np.inf)))
     d1 = load_catalog( fn1, save_catalog, loader, files, mrange1, nthreads )  
