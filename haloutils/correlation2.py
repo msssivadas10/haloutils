@@ -223,6 +223,7 @@ def correlation_from_count(pc: pcresult, estimator: str = 'ls') -> Any:
     if estimator.lower() in [ "peebles-hauser", "natural" ]: 
         if "RR" not in pairs: raise ValueError("missing RR counts")
         xi    = np.zeros_like( pairs["DD"] )
+        xi[:] = np.nan
         m     = ( pairs["RR"] != 0. )
         xi[m] = pairs["DD"][m] / pairs["RR"][m] - 1
         return xi
@@ -230,6 +231,7 @@ def correlation_from_count(pc: pcresult, estimator: str = 'ls') -> Any:
     if estimator.lower() in [ "davis-peebles" , "dp" ]: 
         if "DR" not in pairs: raise ValueError("missing DR counts")
         xi    = np.zeros_like( pairs["DD"] )
+        xi[:] = np.nan
         m     = ( pairs["DR"] != 0. )
         xi[m] = pairs["DD"][m] / pairs["DR"][m] - 1
         return xi
@@ -238,6 +240,7 @@ def correlation_from_count(pc: pcresult, estimator: str = 'ls') -> Any:
         if "RR" not in pairs: raise ValueError("missing RR counts")
         if "DR" not in pairs: raise ValueError("missing DR counts")
         xi    = np.zeros_like( pairs["DD"] )
+        xi[:] = np.nan
         m     = ( pairs["DR"] != 0. )
         xi[m] = (pairs["DD"][m] * pairs["RR"][m]) / (pairs["DR"][m]**2) - 1
         return xi
@@ -246,6 +249,7 @@ def correlation_from_count(pc: pcresult, estimator: str = 'ls') -> Any:
         if "RR" not in pairs: raise ValueError("missing RR counts")
         if "DR" not in pairs: raise ValueError("missing DR counts")
         xi    = np.zeros_like( pairs["DD"] )
+        xi[:] = np.nan
         m     = ( pairs["RR"] != 0. )
         xi[m] = (pairs["DD"][m] - 2*pairs["DR"][m] + pairs["RR"][m]) / pairs["RR"][m]
         return xi
