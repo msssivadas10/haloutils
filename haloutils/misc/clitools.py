@@ -1,5 +1,5 @@
 import os, os.path, logging.config, click
-from typing import overload
+from typing import overload, Literal
 
 PATH_DIR    = 'DIR'
 PATH_EXISTS = 'EXISTS'
@@ -23,6 +23,8 @@ def command_with_options(fn, /, **option_spec: tuple):
             attrs.update( multiple = True, envvar = p.name.upper() )
         elif get_origin(optype) is tuple: 
             optype = get_args(optype)
+        elif get_origin(optype) is Literal:
+            optype = click.Choice(get_args(optype))
         elif optype is pathlib.Path:
             path_args = {}
             if PATH_DIR    in flags: path_args["file_okay"] = False
