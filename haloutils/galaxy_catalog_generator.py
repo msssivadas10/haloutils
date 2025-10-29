@@ -637,37 +637,8 @@ def galaxy_catalog_generator(
     shutil.rmtree(work_dir, ignore_errors = True)
     return
 
-if __name__ == "__main__": 
-    import importlib.util
-    path = Path(__file__).parent.joinpath("misc", "clitools.py")
-    spec = importlib.util.spec_from_file_location( "misc.clitools", str(path) )
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod) 
-    mod.build_cli(
-        (galaxy_catalog_generator, dict(
-                simname      = (["-s" ], "Name of simulation"             ,                ),
-                redshift     = (["-z" ], "Redshift value"                 ,                ),
-                mmin         = (["-mm"], "Central galaxy threshold mass"  ,                ),
-                m0           = (["-m0"], "Satellite galaxy threshold"     ,                ),
-                m1           = (["-m1"], "Satellite count amplitude"      ,                ),
-                sigma_m      = (["-w" ], "Central galaxy width parameter" ,                ),
-                alpha        = (["-a" ], "Satellite power law count index",                ),
-                scale_shmf   = (["-b" ], "SHMF scale parameter"           ,                ),
-                slope_shmf   = (["-j" ], "SHMF slope parameter"           ,                ),
-                filter_fn    = (["-f" ], "Filter function for variance"   ,                ),
-                sigma_size   = (["-k" ], "Size of variance table"         ,                ),
-                output_path  = (["-o" ], "Path to output files"           , 'DIR'          ),
-                catalog_path = (["-l" ], "Path to catalog files"          , 'DIR', 'EXISTS'),
-                nthreads     = (["-n" ], "Number of threads to use"       ,                ),
-            )
-        ),
-        version = __version__,   
-        logfn   = Path(__file__).name.rsplit(os.extsep, maxsplit = 1)[0], 
-        ignore_warnings = True,
-    )() # executing as command
-    
-    # NOTE: for testing: will be removed later...
-    # galaxy_catalog_generator(
-    #     "AbacusSummit_hugebase_c000_ph000", 3., 1e+12, 1e+12, 
-    #     1e+13, output_path="_data/", catalog_path="_data/abacus/"
-    # )
+# NOTE: for testing: will be removed later...
+# galaxy_catalog_generator(
+#     "AbacusSummit_hugebase_c000_ph000", 3., 1e+12, 1e+12, 
+#     1e+13, output_path="_data/", catalog_path="_data/abacus/"
+# )

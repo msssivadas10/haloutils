@@ -568,52 +568,13 @@ def _load_galaxies(file: str, mrange: tuple[float, float]) -> Any:
             posn = posn[selection]
     return np.array(posn)
 
-
-if __name__ == "__main__":
-    import importlib.util
-    path = Path(__file__).parent.joinpath("misc", "clitools.py")
-    spec = importlib.util.spec_from_file_location( "misc.clitools", str(path) )
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod) 
-    mod.build_cli(
-        (abacus_corrfunc, dict(
-            simname  = (["-s" ], "Name of simulation"               ,                ),
-            redshift = (["-z" ], "Redshift value"                   ,                ),
-            rbins    = (["-r" ], "Distance bin edges (Mpc)"         ,                ),
-            mrange1  = (["-m1"], "Mass range for first set (Msun)"  ,                ),
-            mrange2  = (["-m2"], "Mass range for second set (Msun)" ,                ),
-            outfile  = (["-o" ], "Path to output file"              ,                ), 
-            workdir  = (["-w" ], "Working directory"                , 'DIR'          ), 
-            loc      = (["-l" ], "Path to catalog files"            , 'DIR', 'EXISTS'),
-            nthreads = (["-n" ], "Number of threads to use"         ,                ),
-            subdivs  = (["-j" ], "Number of jackknife samples"      ,                ),
-            rseed    = (["-rs"], "Random seed"                      ,                ),
-            randsize = (["-f" ], "Random catalog size"              ,                ),
-        )), 
-        (galaxy_corrfunc, dict(
-            loc      = (["-l" ], "Path to catalog files"           ,      ),
-            rbins    = (["-r" ], "Distance bin edges (Mpc)"        ,      ),
-            mrange1  = (["-m1"], "Mass range for first set (Msun)" ,      ),
-            mrange2  = (["-m2"], "Mass range for second set (Msun)",      ),
-            outfile  = (["-o" ], "Path to output file"             ,      ), 
-            workdir  = (["-w" ], "Working directory"               , 'DIR'), 
-            nthreads = (["-n" ], "Number of threads to use"        ,      ),
-            subdivs  = (["-j" ], "Number of jackknife samples"     ,      ),
-            rseed    = (["-rs"], "Random seed"                     ,      ),
-            randsize = (["-f" ], "Random catalog size"             ,      ),
-        )),
-        version = __version__,   
-        logfn   = Path(__file__).name.rsplit(os.extsep, maxsplit = 1)[0], 
-        ignore_warnings = True,
-    )() # executing as command
-    
-    # NOTE: for testing: will be removed later...
-    # logging.basicConfig(level=logging.INFO)
-    # os.makedirs('./xi_out', exist_ok=True)
-    # abacus_corrfunc(
-    #     'AbacusSummit_hugebase_c000_ph000', 3., np.logspace(-1, 2, 9), 
-    #     (5e+12, 1e+13), (5e+12, 1e+13), '_data/x.asdf', 
-    #     'xi_out', '_data/', -1, 2
-    # )
-    # with asdf.open("_data/x.asdf") as af:
-    #     print(af['data'])
+# NOTE: for testing: will be removed later...
+# logging.basicConfig(level=logging.INFO)
+# os.makedirs('./xi_out', exist_ok=True)
+# abacus_corrfunc(
+#     'AbacusSummit_hugebase_c000_ph000', 3., np.logspace(-1, 2, 9), 
+#     (5e+12, 1e+13), (5e+12, 1e+13), '_data/x.asdf', 
+#     'xi_out', '_data/', -1, 2
+# )
+# with asdf.open("_data/x.asdf") as af:
+#     print(af['data'])

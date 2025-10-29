@@ -160,26 +160,3 @@ def abacus_massfunction(
         )
 
     return (dndlnm, centers)
-
-if __name__ == "__main__":
-    import importlib.util
-    path = Path(__file__).parent.joinpath("misc", "clitools.py")
-    spec = importlib.util.spec_from_file_location( "misc.clitools", str(path) )
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod) 
-    mod.build_cli(
-        (abacus_massfunction, dict(
-            simname  = ( ["-s"], "Name of the abacus simulation",         ),
-            redshift = ( ["-z"], "Redshift of simulation"       ,         ),
-            bins     = ( ["-b"], "Mass bin edges in Msun"       ,         ),
-            outfile  = ( ["-o"], "Path for the output file"     ,         ),
-            loc      = ( ["-l"], "Path to search halo catalogs" , 'EXISTS'),
-            nprocs   = ( ["-n"], "Number of threads"            ,         ),
-            smooth   = ( ["-f"], "Size of the smoothing window" ,         ),
-        )), 
-        help    = "Calculate halo mass-function from halo catalogs.",
-        version = __version__,   
-        logfn   = Path(__file__).name.rsplit(os.extsep, maxsplit = 1)[0], 
-        group   = True,
-        ignore_warnings = True,
-    )() # executing as command
