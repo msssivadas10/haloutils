@@ -69,7 +69,7 @@ contains
         real(c_double) :: rho_m, rho_h, p_cen, lam_sat
 
         rho_m = params%Om0 * ( critical_density_const * params%H0**2 ) ! Matter density at z=0 in Msun/Mpc^3 
-        rho_h = rho_m ! Halo density (TODO: chek if the halo density is rho_m * self.Delta)
+        rho_h = rho_m * params%Delta_m ! Halo density (TODO: chek if the halo density is rho_m * self.Delta)
 
         ! Lagrangian radius (r) corresponding to halo mass
         args%lnr = ( args%lnm + log(3._c_double / (4*pi) / rho_h ) ) / 3._c_double ! r in Mpc
