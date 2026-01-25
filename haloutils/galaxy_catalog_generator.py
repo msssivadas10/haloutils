@@ -20,18 +20,17 @@ hmargs_t = np.dtype([
 ], align = True)
 
 # Halo buffer record struct:
-# halodata_t = np.dtype([("id", "<i8"),("pos", "<f8", 3),("mass", "<f8")])               
-halodata_t = np.dtype([("id", "<i8"),("xpos", "<f8"),("ypos", "<f8"),("zpos", "<f8"),("mass", "<f8")])               
+halodata_t = np.dtype([("id", "<i8"),("pos", "<f8", 3),("mass", "<f8")])               
 
 # Galaxy buffer record struct:
 galaxydata_t = np.dtype([("id", "<i8"),("pos", "<f8", 3),("mass", "<f8"),("typ", "S1")]) 
 
 # A tuple of arguments to the galaxy catalog generation library function:  
-cgargs_t = namedtuple("cgargs_t", 
-    ["halo_path", "glxy_path", "logs_path", "hmargs", "bbox", 
-     "pktab", "pktab_size", "lnma", "lnmb", "sigmatab_size" , 
-     "filt", "mrsc_table", "seed", "nthreads", "n_halos"    ]
-)
+cgargs_t = namedtuple("cgargs_t", [
+    "halo_path", "glxy_path" , "logs_path", "hmargs"  , "bbox"         , 
+    "pktab"    , "pktab_size", "lnma"     , "lnmb"    , "sigmatab_size", 
+    "filt"     , "mrsc_table", "seed"     , "nthreads",              
+])
 
 # Types of arguments to the galaxy catalog generation library function:
 cgargtypes = cgargs_t(
@@ -49,7 +48,6 @@ cgargtypes = cgargs_t(
     mrsc_table    = npct.ndpointer("f8", 2, flags="C_CONTIGUOUS"),
     seed          = ct.c_int64,
     nthreads      = ct.c_int,
-    n_halos       = ct.c_int64,
 )
 
 ############################################################################################################
@@ -102,29 +100,21 @@ def pack_arguments(
         mrsc_table    = np.zeros((var_tabsize, 4), "f8"),
         seed          = rseed, 
         nthreads      = nthreads,
-        n_halos       = 0,
     )
 
     # Save the halo catalog data a binary file for sharing. Passing the halo catalog 
     # data loder as a generator, so that only the needed the data is loaded, making
     # effiicient use of memory. 
-    total_halos = 0
-    with open(args.halo_path, 'w') as fp: 
+    with open(args.halo_path, 'wb') as fp: 
         # Data written as a stream of `halodata_t` structs.
         for halo_id, halo_pos, halo_mass in data_generator:
             n_halos     = np.size(halo_id)
             halo_buffer = np.empty((n_halos, ), dtype = halodata_t)
             halo_buffer["id"  ] = np.array(halo_id  ).astype("<i8", copy = False)
-            # halo_buffer["pos" ] = np.array(halo_pos ).astype("<f8", copy = False)
-            halo_buffer["xpos"] = np.array(halo_pos[:,0]).astype("<f8", copy = False)
-            halo_buffer["ypos"] = np.array(halo_pos[:,1]).astype("<f8", copy = False)
-            halo_buffer["zpos"] = np.array(halo_pos[:,2]).astype("<f8", copy = False)
+            halo_buffer["pos" ] = np.array(halo_pos ).astype("<f8", copy = False)
             halo_buffer["mass"] = np.array(halo_mass    ).astype("<f8", copy = False)
-            # halo_buffer.tofile(fp)
-            np.savetxt(fp, halo_buffer, fmt = ['%d','%.18e','%.18e','%.18e','%.18e'], delimiter = ' ')
-            total_halos += n_halos
+            halo_buffer.tofile(fp)
     
-    args = args._replace( n_halos = total_halos )
     return args
 
 def prepare_abacus_workspace(
@@ -607,9 +597,10 @@ def galaxy_catalog_generator(
     # Random seed value can also be passed as an environment variable. It should
     # be a positive integer. Otherwise, a default value is generated based on the
     # current time. 
-    if not isinstance(rseed, int):
-        rseed = os.environ.get("RSEED", "None")
-        rseed = int(rseed) if str.isnumeric(rseed) else None
+    # if not isinstance(rseed, int):
+    #     rseed = os.environ.get("RSEED", "None")
+    #     rseed = int(rseed) if str.isnumeric(rseed) else None
+    rseed = 123456
 
     catalog_path, output_path = Path(catalog_path), Path(output_path)
     if not catalog_path.exists(): raise FileNotFoundError(f"path does not exist: {catalog_path}")
@@ -617,8 +608,9 @@ def galaxy_catalog_generator(
 
     # Creating a temporary working directory: all the intermediate files like 
     # halo and galaxy data buffers are created in this temp directory.
-    work_dir = Path( tempfile.mkdtemp(prefix = f".gcg.", suffix="0", dir=str(output_path)) )
-    # work_dir = Path( tempfile.mkdtemp(prefix = f".gcg.{os.getpid()}.", dir=str(output_path)) )
+    # work_dir = Path( tempfile.mkdtemp(prefix = f".gcg.{os.getpid()}.") )
+    work_dir = output_path.joinpath( "work" )
+    if not work_dir.exists(): os.makedirs( work_dir, exist_ok=True )
 
     # Setting up shared data based on simulation. Type of simulation is calculated
     # based on the prefix of its name.  
@@ -641,17 +633,25 @@ def galaxy_catalog_generator(
     meta, args = meta_and_args
     
     # Generating the galaxy data and exporting to ASDF format
-    # generate_galaxies(args)  
-    # export_data_products(args, meta, output_path) 
+    generate_galaxies(args)  
+    export_data_products(args, meta, output_path) 
 
     # Cleaning up the working directory:
     # shutil.rmtree(work_dir, ignore_errors = True)
     return
 
 # NOTE: for testing: will be removed later...
-import logging
-logging.basicConfig(level=logging.DEBUG)
-galaxy_catalog_generator(
-    "AbacusSummit_hugebase_c000_ph000", 3., 1e+12, 1e+12, 
-    1e+13, output_path="_data/", catalog_path="_data/abacus/"
-)
+
+# import logging
+# logging.basicConfig(level=logging.DEBUG)
+# galaxy_catalog_generator(
+#     "AbacusSummit_hugebase_c000_ph000", 3., 2.9175e+12, 2.9175e+12, #1e+12, 1e+12, 
+#     1e+13, output_path="_data/", catalog_path="_data/abacus/"
+# )
+
+# mm = np.memmap("_data/work/hbuf.bin", dtype = halodata_t, mode = 'r', offset = 0)
+# print(mm)
+
+# mm = np.memmap("_data/work/gbuf.bin", dtype = galaxydata_t, mode = 'r', offset = 0)
+# mm = np.memmap("/home/ms3/Documents/phd/cosmo/workspace/cosmo-work2/Catalogs/Galaxies/T0/work/gbuf.bin", dtype = galaxydata_t, mode = 'r', offset = 0)
+# print( np.unique(mm['typ']) )
