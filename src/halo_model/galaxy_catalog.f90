@@ -36,15 +36,14 @@ module galaxy_catalog_mod
         !! Struct containing various parameters for galaxy catalog
         !! generation (execpt halo model parameters). 
 
-        real(c_double)     :: lnm    !! Natural log of halo mass in Msun
-        real(c_double)     :: pos(3) !! Coordinates of the halo in Mpc units
-        real(c_double)     :: lnr    !! Natural log of halo radius in Mpc
-        real(c_double)     :: s      !! Matter variance corresponding to this halo mass
-        real(c_double)     :: c      !! Concentration parameter for the halo
-        integer(c_int64_t) :: n_cen  !! Number of central galaxies (0 or 1)
-        integer(c_int64_t) :: n_sat  !! Number of satellite galaxies
-        integer(c_int64_t) :: rstate !! Random number generator state
-
+        real(c_double) :: lnm    !! Natural log of halo mass in Msun
+        real(c_double) :: pos(3) !! Coordinates of the halo in Mpc units
+        real(c_double) :: lnr    !! Natural log of halo radius in Mpc
+        real(c_double) :: s      !! Matter variance corresponding to this halo mass
+        real(c_double) :: c      !! Concentration parameter for the halo
+        real(c_double) :: n_cen_avg
+        real(c_double) :: n_sat_avg
+        
         real(c_double) :: boxsize(3)
         !! Size of the bounding box containing all the halos in the 
         !! simulation. Used for periodic wrapping galaxy position.
@@ -52,6 +51,11 @@ module galaxy_catalog_mod
         real(c_double) :: offset(3)
         !! Coordinates of the bottom-lower-left corner of the bounding 
         !! box. Used for periodic wrapping galaxy position.
+        
+        integer(c_int64_t) :: n_cen  !! Number of central galaxies (0 or 1)
+        integer(c_int64_t) :: n_sat  !! Number of satellite galaxies
+
+        integer(c_int64_t) :: rstate !! Random number generator state
 
     end type 
 
@@ -78,6 +82,8 @@ contains
         ! so that the value is either 1 or 0. If the model uses a step function use 
         ! the average count as the actual count. 
         p_cen = central_count(params, args%lnm)
+        args%n_cen_avg = p_cen
+        args%n_sat_avg = 0._c_double
         if ( abs(params%sigma_m) < 1e-08_c_double ) then
             args%n_cen = int(p_cen, kind=c_int64_t)
         else
@@ -89,6 +95,7 @@ contains
         ! calculated average.
         lam_sat    = satellite_count(params, args%lnm)
         args%n_sat = poisson_rv(args%rstate, lam_sat)
+        args%n_sat_avg = lam_sat
         
         if ( params%scale_shmf < exp(params%lnm_min - args%lnm) ) then 
             ! Halo mass correspond to an invalid satellite galaxy mass range: no satellites
@@ -191,26 +198,47 @@ contains
 
         real(c_double), intent(in) :: a
         real(c_double) :: res, x, p1, p2
-
+        
         integer, parameter :: f8 = c_double
+        integer, parameter :: max_iterations = 100
+        integer :: iter
 
-        ! Using an approximate piecewise rational function for inverting the 
-        ! c-A(c) relation. This fit works good upto A(c) ~ 10, with less that  
-        ! 10% error. For getting the actual value, one should invert the NFW 
-        ! mass function, A(c) = log(1+c) - c/(1+c).  
-        x = log10(a)
-        if ( a < 1e-03_c_double ) then
-            res = 0.50018962_f8*x + 0.15241388_f8
-        else if ( a < 2._c_double ) then
-            p1  = 2699.40545133_f8 + 2921.07235917_f8*x - 1162.90566455_f8*x**2 
-            p2  = 3705.23701996_f8 - 3065.75405505_f8*x -   61.92662277_f8*x**2
-            res = p1 / p2
-        else
-            p1  = 47.25501938_f8 + 32.98237791_f8*x - 38.26172387_f8*x**2  
-            p2  = 66.29326139_f8 - 87.37718415_f8*x + 29.86558497_f8*x**2
-            res = p1 / p2
+        ! Inverting the NFW mass function, A(c) = log(1+c) - c/(1+c).
+        if ( a > 15._c_double ) then
+            ! Using the approximation A(c) = log(1+c) - 1 for large c:
+            res = exp(1._c_double + a) - 1._c_double
+        else if ( a < 1e-06_c_double ) then
+            res = sqrt(2*a)
+        else 
+            ! Using Newton method to invert the NFW mass function:
+            res = a
+            do iter = 1, max_iterations
+                x   = res 
+                p1  = log(1 + x) - x / (1 + x) ! A(c)
+                p2  = x / (1 + x)**2           ! A'(c)
+                res = x - (p1 - a) / p2
+                if ( abs(res - x) < max( 1e-06_c_double, 1e-06_c_double*abs(res) ) ) &
+                    exit
+            end do
         end if
-        res = 10._c_double**res
+
+        ! ! Using an approximate piecewise rational function for inverting the 
+        ! ! c-A(c) relation. This fit works good upto A(c) ~ 10, with less that  
+        ! ! 10% error. For getting the actual value, one should invert the NFW 
+        ! ! mass function, A(c) = log(1+c) - c/(1+c).  
+        ! x = log10(a)
+        ! if ( a < 1e-03_c_double ) then
+        !     res = 0.50018962_f8*x + 0.15241388_f8
+        ! else if ( a < 2._c_double ) then
+        !     p1  = 2699.40545133_f8 + 2921.07235917_f8*x - 1162.90566455_f8*x**2 
+        !     p2  = 3705.23701996_f8 - 3065.75405505_f8*x -   61.92662277_f8*x**2
+        !     res = p1 / p2
+        ! else
+        !     p1  = 47.25501938_f8 + 32.98237791_f8*x - 38.26172387_f8*x**2  
+        !     p2  = 66.29326139_f8 - 87.37718415_f8*x + 29.86558497_f8*x**2
+        !     res = p1 / p2
+        ! end if
+        ! res = 10._c_double**res
         
     end function nfw_c
 
@@ -423,7 +451,7 @@ contains
         integer(c_int64_t) :: istart, istop, i, n, gsize 
         type(cgargs_t)     :: args 
         type(galaxydata_t), allocatable :: gbuf(:) ! Galaxy position and mass
-        integer(c_int64_t), parameter   :: buffer_size = 10000
+        integer(c_int64_t), parameter   :: buffer_size = 100000
 
         !$omp parallel private(nts, tid, istart, istop, i, gbuf, n, gsize, args)
 
@@ -448,10 +476,11 @@ contains
             
             ! Setting up 
             call setup_catalog_generation(hmargs, args)
-
-            n = args%n_cen + args%n_sat ! total number of galaxies in this halo 
-            if ( n < 1 ) cycle
+            if (args%n_cen < 1 ) cycle ! no central galaxies => no galaxies
+            ! if ( args%n_sat >= buffer_size ) cycle
             
+            n = args%n_cen + args%n_sat ! total number of galaxies in this halo 
+
             if ( gsize + n  <= buffer_size ) then
                 ! Local buffer has not enough data for saving the new galaxy data:
                 ! Current data is written to the main output buffer and the start 
@@ -461,7 +490,7 @@ contains
                 call flush_to_buffer_( fo, gsize, ngals, gbuf(1:gsize) )
                 !$omp end critical
             end if    
-            
+
             ! Generating the galaxies
             gbuf(gsize+1:gsize+n)%halo_id = hbuf(i)%id ! assign parent halo
             call generate_galaxies( hmargs, args, n, gbuf(gsize+1:gsize+n) )
