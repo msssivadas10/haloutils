@@ -13,24 +13,35 @@ def optimizer1(
         mass_func   : nt.NDArray[np.float64], 
         sigma_m     : float                 = 0.,
         alpha       : float                 = 1.,
-        mmin_bounds : tuple[float, float]   = (1e+12, 1e+18),
-        m1_bounds   : tuple[float, float]   = (1e+13, 1e+18),
+        beta        : float                 =-1.,
+        mmin_bounds : tuple[float, float]   = (1e+12, 1e+14),
+        m1_bounds   : tuple[float, float]   = (1e+13, 1e+14),
         tol         : float                 = 1e-08,
         gridsize    : int | tuple[int, int] = (11, 11),
+        save_to     : str                   = '',
     ) -> tuple[float, float, float, float, float]:
+
+    def calculate_lnm0(lnm_min, sigma_m = 0., beta = -1.):
+        # Calculate the value of M0 based on Mmin and sigma_m values. Also add
+        # the offset corresponding parameter beta, so that no satellites are 
+        # created for Mmin < beta*M...  
+        lnm0 = lnm_min - 3*abs(sigma_m)
+        if beta > 0.: 
+            lnm0 = lnm0 + np.log(beta)
+        return lnm0
 
     logger = logging.getLogger()
 
-    sigma_m   = abs(sigma_m)
-    mass_func = np.asarray(mass_func, dtype = 'f8')
+    sigma_m    = abs(sigma_m)
+    mass_func  = np.asarray(mass_func, dtype = 'f8', copy=True)
     assert np.ndim(mass_func) == 2 and np.size(mass_func, 1) == 2
 
     # Getting the log of mass in Msun and dn/dln(m) (Mpc^-3) from the table:
-    lnm, dndlnm = np.log(mass_func[:, 0]), mass_func[:, 1]
+    lnm, dndlnm = mass_func[:, 0], np.exp( mass_func[:, 1] )
 
     def get_observables(p: tuple[float, float]) -> tuple[float, float]:
         lnm_min, lnm1 = p
-        lnm0 = lnm_min    # setting M0 = M_min
+        lnm0          = calculate_lnm0(lnm_min, sigma_m, beta)
 
         # Central galaxy count function
         arg       = lnm - lnm_min
@@ -74,13 +85,14 @@ def optimizer1(
             np.interp( j, [0, gridsize[1]-1], lnm1_bounds    ), 
         )
     
+    data = np.fromfunction( 
+        np.vectorize(lambda i, j: cost( gridp(i, j) ), otypes=[float]), 
+        gridsize,
+    )
     initial_guess = gridp(
         *np.unravel_index( 
             np.argmin(
-                np.fromfunction( 
-                    np.vectorize(lambda i, j: cost( gridp(i, j) ), otypes=[float]), 
-                    gridsize,
-                )
+                data
             ),
             gridsize, 
         )
@@ -100,13 +112,50 @@ def optimizer1(
     else:
         logger.info(f"optimization failed, message: {optim_result.message!r}")
     lnm_min, lnm1 = float(optim_result.x[0]), float(optim_result.x[1])
-
+    lnm0          = calculate_lnm0(lnm_min, sigma_m, beta)
+    
     ngal_opt, fsat_opt = get_observables(optim_result.x)
     logger.info(f"calculated values: n_gal={ngal_opt:.6g}, f_sat={fsat_opt:.6g}")
     
     # Optimum HOD parameters: 
     #               log(M_min) sigma_M  log(M0)  log(M1) alpha
-    optimum_hod = ( lnm_min,   sigma_m, lnm_min, lnm1,   alpha )
+    optimum_hod = ( lnm_min,   sigma_m, lnm0,    lnm1,   alpha )
+
+    if save_to and isinstance(save_to, str):
+        # Save results to a file:
+        import asdf
+        with asdf.AsdfFile({
+            "lnm_min" : lnm_min,   
+            "sigma_m" : sigma_m, 
+            "lnm0"    : lnm0,    
+            "lnm1"    : lnm1,   
+            "alpha"   : alpha,
+            "ngal_opt": ngal_opt, 
+            "fsat_opt": fsat_opt,
+            "options" : {
+                "n_gal"      : n_gal,
+                "f_sat"      : f_sat,
+                "sigma_m"    : sigma_m,
+                "alpha"      : alpha,
+                "beta"       : beta,
+                "mmin_bounds": mmin_bounds,
+                "m1_bounds"  : m1_bounds,
+                "tol"        : tol,
+                "gridsize"   : gridsize,
+            }, 
+            "data": {
+                "mass_func"  : mass_func,
+                "cost_grid"  : data,
+            }, 
+            "optimization_result": {
+                "initial" : tuple([ *initial_guess  ]),
+                "optimum" : tuple([ *optim_result.x ]),
+                "message" : optim_result.message,
+                "success" : optim_result.success,
+                "nit"     : optim_result.nit,
+            }
+        }) as af: af.write_to(save_to)
+    
     return optimum_hod
 
 # if __name__ == "__main__":
