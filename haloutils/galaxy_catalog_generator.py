@@ -608,9 +608,9 @@ def galaxy_catalog_generator(
 
     # Creating a temporary working directory: all the intermediate files like 
     # halo and galaxy data buffers are created in this temp directory.
-    # work_dir = Path( tempfile.mkdtemp(prefix = f".gcg.{os.getpid()}.") )
-    work_dir = output_path.joinpath( "work" )
-    if not work_dir.exists(): os.makedirs( work_dir, exist_ok=True )
+    work_dir = Path( tempfile.mkdtemp(prefix = f".gcg.{os.getpid()}.") )
+    # work_dir = output_path.joinpath( "work" )
+    # if not work_dir.exists(): os.makedirs( work_dir, exist_ok=True )
 
     # Setting up shared data based on simulation. Type of simulation is calculated
     # based on the prefix of its name.  
@@ -637,7 +637,7 @@ def galaxy_catalog_generator(
     export_data_products(args, meta, output_path) 
 
     # Cleaning up the working directory:
-    # shutil.rmtree(work_dir, ignore_errors = True)
+    shutil.rmtree(work_dir, ignore_errors = True)
     return
 
 # NOTE: for testing: will be removed later...
